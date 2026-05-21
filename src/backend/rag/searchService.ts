@@ -3,7 +3,14 @@ import { qdrant } from '../db/qdrant';
 import 'dotenv/config';
 
 // Gemini Client іске қосу
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+const ai = new GoogleGenAI({
+  apiKey: process.env.GEMINI_API_KEY,
+  httpOptions: {
+    headers: {
+      'User-Agent': 'aistudio-build',
+    }
+  }
+});
 const QDRANT_COLLECTION = 'daraq_books';
 
 // Қайтарылатын құрылым (Interface)

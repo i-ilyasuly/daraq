@@ -99,6 +99,19 @@ async function addWatermark(imageUrl: string, bookName: string, pageNumber: numb
   }
 }
 
+/**
+ * Telegram қабылдамайтын <br> және <p> сияқты тегтерді кәдімгі жол ауыстыруға алмастыру,
+ * және қажет болған жағдайда жұлдызшалы Markdown-ды HTML форматына келтіру.
+ */
+export function formatTelegramMessage(text: string): string {
+  let formatted = text;
+  formatted = formatted.replace(/<br\s*\/?>/gi, '\n');
+  formatted = formatted.replace(/<\/p>/gi, '\n\n').replace(/<p>/gi, '');
+  formatted = formatted.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>'); // **bold** -> <b>bold</b> (Fallback)
+  formatted = formatted.replace(/\*(.*?)\*/g, '<i>$1</i>'); // *italic* -> <i>italic</i> (Fallback)
+  return formatted;
+}
+
 export function setupBot() {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const appUrl = process.env.APP_URL;
@@ -138,14 +151,11 @@ export function setupBot() {
       // 2. LLM арқылы жауап генерациялау
       const answerData = await generateAnswer(chatId, query, searchResults);
 
-      let finalMessage = answerData.answer;
-      // Telegram қабылдамайтын <br> және <p> сияқты тегтерді кәдімгі жол ауыстыруға алмастыру
-      finalMessage = finalMessage.replace(/<br\s*\/?>/gi, '\n');
-      finalMessage = finalMessage.replace(/<\/p>/gi, '\n\n').replace(/<p>/gi, '');
-      finalMessage = finalMessage.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>'); // **bold** -> <b>bold</b> (Fallback)
-      finalMessage = finalMessage.replace(/\*(.*?)\*/g, '<i>$1</i>'); // *italic* -> <i>italic</i> (Fallback)
+      let finalMessage = formatTelegramMessage(answerData.answer);
 
-      finalMessage += '\n\n<i>Сұрағыңызды нақтылап қоюыңызға болады.</i>'; // Follow-up мәтін
+      if (!answerData.answer.startsWith('⚠️')) {
+        finalMessage += '\n\n<i>Сұрағыңызды нақтылап қоюыңызға болады.</i>'; // Follow-up мәтін
+      }
 
       // 3. Батырмаларды құрастыру (Егер дәлелдер табылса)
       let inlineKeyboard: any = null;
@@ -190,7 +200,7 @@ export function setupBot() {
       // Қателерді өңдеу
       let errorMessage = 'Кешіріңіз, жүйелік қателікке байланысты жауап бере алмаймын. Сұрағыңызды нақтылап қоюыңызға болады.';
       if (isCreditsError) {
-        errorMessage = '⚠️ <b>Жүйелік қателік (429 Resource Exhausted / Credits Depleted):</b>\n\nБағдарламаның Gemini API кілтіндегі кредиттері (балансы) таусылған немесе шектеу қойылған. Бот жауап бере алуы үшін Google Cloud немесе AI Studio балансын толтырыңыз.\n\n<i>Сұрағыңызды кейінірек қайталап көріңіз.</i>';
+        errorMessage = '⚠️ <b>Жүйелік қате (429 Resource Exhausted / Billing/Credits Depleted):</b>\n\nСіздің Gemini API кілтіңіздегі кредиттер (баланс) немесе квота таусылды. Бот жауап бере алуы үшін <a href="https://aistudio.google.com/">Google AI Studio Settings</a> немесе Google Cloud billing-те балансыңызды толтырыңыз немесе жаңа API кілтін пайдаланыңыз.\n\nҚосымша ақпарат: <a href="https://ai.google.dev/gemini-api/docs/billing#prepay">Gemini API Prepay Billing</a>';
       }
 
       if (statusMessageId) {
@@ -232,7 +242,12 @@ export function setupBot() {
 
   // Вэбхук арқылы немесе ұзақ сұрау арқылы қосу
   const isCloudRun = process.env.K_SERVICE !== undefined;
-  const isProduction = process.env.NODE_ENV === 'production' || isCloudRun;
+  const appUrlLower = appUrl ? appUrl.toLowerCase() : '';
+  const isDevelopment = process.env.NODE_ENV === 'development' || 
+                        appUrlLower.includes('ais-dev-') || 
+                        appUrlLower.includes('ais-pre-') || 
+                        !appUrl;
+  const isProduction = !isDevelopment;
   const hasAppUrl = appUrl && appUrl !== "MY_APP_URL" && !appUrl.includes("your_") && !appUrl.includes("localhost");
 
   if (isProduction) {

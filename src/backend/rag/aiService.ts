@@ -4,7 +4,14 @@ import { SearchResult } from './searchService';
 import 'dotenv/config';
 
 // 1. Gemini Client қосылымы
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+const ai = new GoogleGenAI({
+  apiKey: process.env.GEMINI_API_KEY,
+  httpOptions: {
+    headers: {
+      'User-Agent': 'aistudio-build',
+    }
+  }
+});
 
 // 2. LLM-ге арналған System Prompt (Жүйелік нұсқаулық)
 const SYSTEM_PROMPT = `Сен Ханафи мазһабы бойынша діни көмекшісің (Daraq). 
@@ -90,7 +97,6 @@ export async function generateAnswer(chatId: string, query: string, context: Sea
     // Gemini SDK STRICTLY ALTERNATING ROLES талабын қамтамасыз ету (user -> model -> user -> model...)
     // Егер екі 'user' немесе екі 'model' қатарынан келсе, алдыңғысын алып тастаймыз немесе біріктіреміз.
     const history: {role: string, parts: {text: string}[]}[] = [];
-    let expectedRole = 'user'; // Тарихты басынан бастап (first message) user-дан күтеміз
     
     for (const msg of rawHistory) {
         if (history.length === 0) {
@@ -154,16 +160,48 @@ export async function generateAnswer(chatId: string, query: string, context: Sea
 
   } catch (error: any) {
     console.error("\n[❌] Жауап генерациялау барысында қателік орын алды (RAG/System Error):", error?.message || error);
-    const errorStr = String(error?.message || error || "");
-    const isCreditsError = errorStr.includes("depleted") || errorStr.includes("429") || errorStr.includes("RESOURCE_EXHAUSTED");
     
-    if (isCreditsError) {
+    const errorStr = [
+      String(error),
+      error?.message ? String(error.message) : "",
+      error?.status ? String(error.status) : "",
+      error?.statusText ? String(error.statusText) : "",
+      typeof error === 'object' ? JSON.stringify(error) : ""
+    ].join(" ").toLowerCase();
+
+    const isLeaked = errorStr.includes("leaked") || errorStr.includes("leak") || errorStr.includes("security") || errorStr.includes("permission_denied") && errorStr.includes("403");
+    const isCreditsError = errorStr.includes("depleted") || errorStr.includes("429") || errorStr.includes("resource_exhausted") || errorStr.includes("quota");
+    const isPermissionError = errorStr.includes("permission_denied") || errorStr.includes("403");
+    const isInvalidKey = errorStr.includes("invalid") || errorStr.includes("not found") || (errorStr.includes("api key") && (errorStr.includes("wrong") || errorStr.includes("bad")));
+
+    if (isLeaked) {
       return {
-        answer: "⚠️ <b>Жүйелік қателік (429 Resource Exhausted / Credits Depleted):</b>\n\nБағдарламаның Gemini API кілтіндегі кредиттері (балансы) таусылған немесе шектеу қойылған. Бот жауап бере алуы үшін Google Cloud немесе AI Studio балансын толтырыңыз.\n\n<i>Сұрағыңызды кейінірек қайталап көріңіз.</i>",
+        answer: "⚠️ <b>Жүйелік қате (API Key Leaked):</b>\n\nҚауіпсіздік мақсатында Google бұл API кілтін бұғаттаған (желіге сыртып кеткені анықталған). Өтінеміз, <a href=\"https://aistudio.google.com/\">Google AI Studio Settings</a> парақшасына өтіп, жаңа API кілтін алып, осы жоба баптауларында жаңартыңыз.",
         sources: context
       };
     }
-    
+
+    if (isCreditsError) {
+      return {
+        answer: "⚠️ <b>Жүйелік қате (429 Resource Exhausted / Billing/Credits Depleted):</b>\n\nСіздің Gemini API кілтіңіздегі кредиттер (баланс) немесе квота таусылды. Бот жауап бере алуы үшін <a href=\"https://aistudio.google.com/\">Google AI Studio Settings</a> немесе Google Cloud billing-те балансыңызды толтырыңыз немесе жаңа API кілтін пайдаланыңыз.\n\nҚосымша ақпарат: <a href=\"https://ai.google.dev/gemini-api/docs/billing#prepay\">Gemini API Prepay Billing</a>",
+        sources: context
+      };
+    }
+
+    if (isPermissionError) {
+      return {
+        answer: "⚠️ <b>Жүйелік қате (403 Permission Denied):</b>\n\nAPI кілттің рұқсаты шектелген немесе бұғатталған. Баптаулардан <code>GEMINI_API_KEY</code> мәнін және оның белсенділігін тексеріңіз.",
+        sources: context
+      };
+    }
+
+    if (isInvalidKey) {
+      return {
+        answer: "⚠️ <b>Жүйелік қате (API Key Invalid):</b>\n\nБотқа орнатылған Gemini API кілті жарамсыз болып табылады. Өтінеміз, баптаулардағы <code>GEMINI_API_KEY</code> мәнін қайта тексеріп көріңіз.",
+        sources: context
+      };
+    }
+
     return {
       answer: "Кешіріңіз, жүйелік қателікке байланысты жауап бере алмаймын.",
       sources: context

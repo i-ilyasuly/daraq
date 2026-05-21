@@ -39,13 +39,16 @@ async function getChatHistory(chatId: string) {
     if (snapshot.empty) return [];
 
     const messages = snapshot.docs.map(doc => doc.data());
-    // Керісінше реттеу (ескі хабарламалардан жаңасына қарай)
-    return messages.reverse().map(msg => ({
-      role: msg.role === 'bot' ? 'model' : 'user', // genai SDK 'model' деп күтеді
+    const formattedHistory = messages.reverse().map(msg => ({
+      role: msg.role === 'bot' ? 'model' : 'user',
       parts: [{ text: msg.text }]
     }));
+
+    // Gemini requires alternating history. To be safe, we will just filter or ensure.
+    // However, for safety without complex merging, let's just log it if we hit a problem later.
+    return formattedHistory;
   } catch (error) {
-    console.error("[❌] Чат тарихын оқу кезінде қате орын алды:", error);
+    console.error("[❌] Чат тарихын оқу кезінде қате орын алды (Firestore Error):", error);
     return [];
   }
 }
@@ -62,7 +65,7 @@ async function saveToChatHistory(chatId: string, role: 'user' | 'bot', text: str
       timestamp: new Date()
     });
   } catch (error) {
-    console.error("[❌] Хабарламаны сақтау кезінде қате орын алды:", error);
+    console.error("[❌] Хабарламаны сақтау кезінде қате орын алды (Firestore Error):", error);
   }
 }
 
@@ -79,26 +82,60 @@ export async function generateAnswer(chatId: string, query: string, context: Sea
     ).join('\n\n');
     
     // LLM-ге жіберілетін жүктеме: Контекст + Пайдаланушы сұрағы
-    const currentPrompt = `Контекст (кітап мәтіндері):\n${contextText}\n\nПайдаланушы сұрағы: ${query}`;
+    let currentPrompt = `Контекст (кітап мәтіндері):\n${contextText}\n\nПайдаланушы сұрағы: ${query}`;
 
     // 1. Тарихты алу
-    const history = await getChatHistory(chatId);
+    const rawHistory = await getChatHistory(chatId);
+    
+    // Gemini SDK STRICTLY ALTERNATING ROLES талабын қамтамасыз ету (user -> model -> user -> model...)
+    // Егер екі 'user' немесе екі 'model' қатарынан келсе, алдыңғысын алып тастаймыз немесе біріктіреміз.
+    const history: {role: string, parts: {text: string}[]}[] = [];
+    let expectedRole = 'user'; // Тарихты басынан бастап (first message) user-дан күтеміз
+    
+    for (const msg of rawHistory) {
+        if (history.length === 0) {
+            history.push(msg); // First message
+        } else {
+            const lastMsg = history[history.length - 1];
+            if (lastMsg.role === msg.role) {
+                // Бірдей рөлдер қатарынан келсе, мәтіндерін біріктіреміз
+                lastMsg.parts[0].text += `\n\n${msg.parts[0].text}`;
+            } else {
+                history.push(msg);
+            }
+        }
+    }
     
     // Барлық хабарламаларды форматтау (Тарих + Ағымдағы сұрақ)
+    // currentPrompt 'user' болғандықтан, ең соңғы тарих 'model' болуына көз жеткіземіз:
+    if (history.length > 0 && history[history.length - 1].role === 'user') {
+       // Егер тарихтың соңы 'user' болса, біз тағы 'user' қосамыз, сондықтан алдыңғы 'user'-ді біріктіреміз:
+       const lastUser = history.pop();
+       if (lastUser) {
+           currentPrompt = `[Алдыңғы хабарлама]: ${lastUser.parts[0].text}\n\n[Жаңа сұрақ]: ${currentPrompt}`;
+       }
+    }
+    
     const contents = [
       ...history,
       { role: 'user', parts: [{ text: currentPrompt }] }
     ];
 
     console.log(`[⏳] LLM-ге сұраныс жіберілуде (gemini-3.1-pro-preview)...`);
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.1-pro-preview',
-      contents: contents,
-      config: {
-        systemInstruction: SYSTEM_PROMPT,
-        temperature: 0.1, // Кесінді мәліметтерден ауытқымауы үшін төмен температура
-      }
-    });
+    let response;
+    try {
+      response = await ai.models.generateContent({
+        model: 'gemini-3.1-pro-preview',
+        contents: contents,
+        config: {
+          systemInstruction: SYSTEM_PROMPT,
+          temperature: 0.1, // Кесінді мәліметтерден ауытқымауы үшін төмен температура
+        }
+      });
+    } catch (genAiError: any) {
+      console.error("\n[❌] Gemini API Error:", genAiError?.response?.data || genAiError?.message || genAiError);
+      throw genAiError; // Try-catch сыртына шығарамыз
+    }
 
     const answerText = response.text || "Кешіріңіз, жауап құрастыру мүмкін болмады.";
     console.log(`[✅] Жауап сәтті генерацияланды.`);
@@ -115,8 +152,8 @@ export async function generateAnswer(chatId: string, query: string, context: Sea
       sources: context // Толықтай дәлел тізімі
     };
 
-  } catch (error) {
-    console.error("\n[❌] Жауап генерациялау барысында қателік:", error);
+  } catch (error: any) {
+    console.error("\n[❌] Жауап генерациялау барысында қателік орын алды (RAG/System Error):", error?.message || error);
     return {
       answer: "Кешіріңіз, жүйелік қателікке байланысты жауап бере алмаймын.",
       sources: context

@@ -170,19 +170,30 @@ export function setupBot() {
       
       const extraOptions = inlineKeyboard ? Object.assign({ parse_mode: 'HTML' }, inlineKeyboard) : { parse_mode: 'HTML' };
       
-      await ctx.reply(finalMessage, extraOptions);
+      try {
+        await ctx.reply(finalMessage, extraOptions);
+      } catch (replyError) {
+        console.error("[⚠️] HTML форматымен жіберу қатесі, таза мәтін жіберілуде:", replyError);
+        // Html тегтерін алып тастау
+        const plainText = finalMessage.replace(/<[^>]*>?/gm, '');
+        const plainOptions = inlineKeyboard ? inlineKeyboard : undefined;
+        await ctx.reply(plainText, plainOptions);
+      }
 
-    } catch (error) {
+    } catch (error: any) {
       console.error("[❌] Telegram ботта қателік орын алды:", error);
+      console.error("Толық қате сипаттамасы:", error?.response?.data || error?.message || error);
+      
       // Қателерді өңдеу
+      const errorMessage = 'Кешіріңіз, жүйелік қателікке байланысты жауап бере алмаймын. Сұрағыңызды нақтылап қоюыңызға болады.';
       if (statusMessageId) {
         try {
-          await ctx.telegram.editMessageText(chatId, statusMessageId, undefined, 'Кешіріңіз, сұрақты өңдеу кезінде қателік кетті.');
+          await ctx.telegram.editMessageText(chatId, statusMessageId, undefined, errorMessage);
         } catch (e) {
-          await ctx.reply('Кешіріңіз, сұрақты өңдеу кезінде қателік кетті.');
+          await ctx.reply(errorMessage);
         }
       } else {
-        await ctx.reply('Кешіріңіз, сұрақты өңдеу кезінде қателік кетті.');
+        await ctx.reply(errorMessage);
       }
     }
   });

@@ -28,6 +28,8 @@ async function addWatermark(imageUrl: string, bookName: string, pageNumber: numb
   `;
 
   let baseImageBuffer: Buffer;
+  let useFallbackWatermark = false;
+
   try {
     const response = await fetch(imageUrl);
     if (!response.ok) throw new Error("Суретті жүктеу мүмкін болмады");
@@ -37,29 +39,64 @@ async function addWatermark(imageUrl: string, bookName: string, pageNumber: numb
     // Бұл код dummy-image-content сынды жарамсыз суретті анықтап, қате лақтырады
     await sharp(baseImageBuffer).metadata();
   } catch (err) {
-    // Егер GCS-тен алынған сурет жарамсыз болса (MVP-дегі mock content), бос орынға сурет сызамыз
-    baseImageBuffer = await sharp({
-      create: {
-        width: 800,
-        height: 600,
-        channels: 4,
-        background: { r: 240, g: 240, b: 240, alpha: 1 }
-      }
-    })
-    .png()
-    .toBuffer();
+    useFallbackWatermark = true;
+    
+    // Егер GCS-тен алынған сурет жарамсыз болса (MVP-дегі mock content), әдемі визуалды шаблон (placeholder) жасаймыз
+    const placeholderSvg = `
+      <svg width="800" height="600" xmlns="http://www.w3.org/2000/svg">
+        <!-- Background -->
+        <rect width="100%" height="100%" fill="#f4f1ea" />
+        
+        <!-- Outer Border -->
+        <rect x="20" y="20" width="760" height="560" fill="none" stroke="#8b7355" stroke-width="3" rx="15" />
+        
+        <!-- Inner Border -->
+        <rect x="35" y="35" width="730" height="530" fill="none" stroke="#d4c5b0" stroke-width="1.5" rx="8" />
+        
+        <!-- Corner Ornaments (Simplified) -->
+        <circle cx="35" cy="35" r="5" fill="#8b7355" />
+        <circle cx="765" cy="35" r="5" fill="#8b7355" />
+        <circle cx="35" cy="565" r="5" fill="#8b7355" />
+        <circle cx="765" cy="565" r="5" fill="#8b7355" />
+        
+        <!-- Center Book / Watermark placeholder -->
+        <text x="50%" y="40%" text-anchor="middle" font-family="serif" font-size="52" font-weight="bold" fill="#3e3222" letter-spacing="4">
+          DARAQ
+        </text>
+        <text x="50%" y="50%" text-anchor="middle" font-family="sans-serif" font-size="24" fill="#5c4d3c">
+          Бұл мәлімет кітапта бар, бірақ
+        </text>
+        <text x="50%" y="56%" text-anchor="middle" font-family="sans-serif" font-size="24" fill="#5c4d3c">
+          сандық нұсқасы (скан) жүктелмеген.
+        </text>
+        
+        <!-- Footer Info -->
+        <rect x="150" y="500" width="500" height="40" fill="#ede8df" rx="20" />
+        <text x="50%" y="527" text-anchor="middle" font-family="sans-serif" font-size="20" fill="#8b7355" font-weight="bold">
+          📖 ${bookName} | ${pageNumber}-бет
+        </text>
+      </svg>
+    `;
+    
+    baseImageBuffer = await sharp(Buffer.from(placeholderSvg))
+      .png()
+      .toBuffer();
   }
 
-  // Суреттің төменгі жағына су белгісін салу
-  return await sharp(baseImageBuffer)
-    .composite([
-      {
-        input: Buffer.from(svgText),
-        gravity: 'south'
-      }
-    ])
-    .jpeg()
-    .toBuffer();
+  // Егер жарамды сурет болса, оның төменгі жағына су белгісін саламыз
+  if (!useFallbackWatermark) {
+    return await sharp(baseImageBuffer)
+      .composite([
+        {
+          input: Buffer.from(svgText),
+          gravity: 'south'
+        }
+      ])
+      .jpeg()
+      .toBuffer();
+  } else {
+    return baseImageBuffer;
+  }
 }
 
 export function setupBot() {
@@ -76,8 +113,8 @@ export function setupBot() {
   // 1. Автоматты сәлемдесу
   bot.start((ctx) => {
     const userName = ctx.from?.first_name || 'Қолданушы';
-    return ctx.reply(
-      `Ассалаумағалейкум, ${userName}! \n\nМен Daraq — Ханафи мазһабы бойынша сенімді діни көмекшіңізбін. Қандай сұрағыңыз бар?`
+    return ctx.replyWithHTML(
+      `Ассалаумағалейкум, <b>${userName}</b>!\n\nМен <b>Daraq</b> — Ханафи мазһабы бойынша сенімді діни көмекшіңізбін. Қандай сұрағыңыз бар?`
     );
   });
 
@@ -102,7 +139,13 @@ export function setupBot() {
       const answerData = await generateAnswer(chatId, query, searchResults);
 
       let finalMessage = answerData.answer;
-      finalMessage += '\n\nСұрағыңызды нақтылап қоюыңызға болады.'; // Follow-up мәтін
+      // Telegram қабылдамайтын <br> және <p> сияқты тегтерді кәдімгі жол ауыстыруға алмастыру
+      finalMessage = finalMessage.replace(/<br\s*\/?>/gi, '\n');
+      finalMessage = finalMessage.replace(/<\/p>/gi, '\n\n').replace(/<p>/gi, '');
+      finalMessage = finalMessage.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>'); // **bold** -> <b>bold</b> (Fallback)
+      finalMessage = finalMessage.replace(/\*(.*?)\*/g, '<i>$1</i>'); // *italic* -> <i>italic</i> (Fallback)
+
+      finalMessage += '\n\n<i>Сұрағыңызды нақтылап қоюыңызға болады.</i>'; // Follow-up мәтін
 
       // 3. Батырмаларды құрастыру (Егер дәлелдер табылса)
       let inlineKeyboard: any = null;
@@ -125,11 +168,9 @@ export function setupBot() {
       // Жауапты жіберу және ескі хабарламаны өшіру
       await ctx.telegram.deleteMessage(chatId, statusMessageId);
       
-      if (inlineKeyboard) {
-        await ctx.reply(finalMessage, inlineKeyboard);
-      } else {
-        await ctx.reply(finalMessage);
-      }
+      const extraOptions = inlineKeyboard ? Object.assign({ parse_mode: 'HTML' }, inlineKeyboard) : { parse_mode: 'HTML' };
+      
+      await ctx.reply(finalMessage, extraOptions);
 
     } catch (error) {
       console.error("[❌] Telegram ботта қателік орын алды:", error);

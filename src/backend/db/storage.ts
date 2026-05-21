@@ -26,7 +26,7 @@ export function initStorage() {
     const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
     const privateKey = process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n');
 
-    if (!projectId || !clientEmail || !privateKey) {
+    if (!projectId || !clientEmail || !privateKey || !privateKey.includes('-----BEGIN PRIVATE KEY-----')) {
       console.warn('GCP credentials not provided. Google Cloud Storage will not be initialized.');
       return null;
     }
@@ -37,13 +37,18 @@ export function initStorage() {
     };
   }
 
-  const storage = new Storage({
-    projectId,
-    credentials,
-  });
+  try {
+    const storage = new Storage({
+      projectId,
+      credentials,
+    });
 
-  console.log('Google Cloud Storage initialized.');
-  return storage;
+    console.log('Google Cloud Storage initialized.');
+    return storage;
+  } catch (error) {
+    console.error('Failed to initialize Google Cloud Storage:', error);
+    return null;
+  }
 }
 
 export const storage = initStorage();

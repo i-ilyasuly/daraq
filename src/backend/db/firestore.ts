@@ -1,4 +1,4 @@
-import * as admin from 'firebase-admin';
+import admin from 'firebase-admin';
 import fs from 'fs';
 import path from 'path';
 
@@ -21,12 +21,13 @@ export function initFirestore() {
       throw new Error(`File ${fullPath} not found`);
     }
   } catch (error) {
+  try {
     const projectId = process.env.FIREBASE_PROJECT_ID;
     const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
     // Handle newlines in private key if passed via env var
     const privateKey = process.env.FIREBASE_PRIVATE_KEY?.replace(/\\n/g, '\n');
 
-    if (!projectId || !clientEmail || !privateKey) {
+    if (!projectId || !clientEmail || !privateKey || !privateKey.includes('-----BEGIN PRIVATE KEY-----')) {
       console.warn('Firebase credentials not fully provided. Firestore will not be initialized.');
       return null;
     }
@@ -36,14 +37,22 @@ export function initFirestore() {
       clientEmail,
       privateKey,
     });
+  } catch (error) {
+    console.error('Failed to parse Firebase credentials:', error);
+    return null;
   }
+}
 
-  admin.initializeApp({
-    credential,
-  });
-
-  console.log('Firebase Firestore initialized.');
-  return admin.firestore();
+  try {
+    admin.initializeApp({
+      credential,
+    });
+    console.log('Firebase Firestore initialized.');
+    return admin.firestore();
+  } catch (error) {
+    console.error('Error initializing Firebase admin:', error);
+    return null;
+  }
 }
 
 export const db = initFirestore();

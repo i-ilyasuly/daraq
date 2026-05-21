@@ -234,7 +234,13 @@ export function setupBot() {
   } else {
     console.log('Development mode detected or APP_URL missing. Starting bot in polling mode...');
     bot.telegram.deleteWebhook({ drop_pending_updates: true }).then(() => {
-      bot.launch({ dropPendingUpdates: true });
+      bot.launch({ dropPendingUpdates: true }).catch((error: any) => {
+        if (error?.response?.error_code === 409) {
+          console.warn('Bot is already running or conflicting with another instance (409 Conflict). Skipping polling startup.');
+        } else {
+          console.error('Error starting polling mode:', error);
+        }
+      });
       console.log('Bot started in polling mode.');
     }).catch((error: unknown) => {
       console.error('Error starting polling mode:', error);

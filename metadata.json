@@ -1,0 +1,6 @@
+{
+  "name": "Daraq - Hanafi AI Assistant",
+  "description": "A production-grade RAG-based AI assistant answering religious queries according to the Hanafi madhhab.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -182,18 +182,25 @@ export function setupBot() {
 
     } catch (error: any) {
       console.error("[❌] Telegram ботта қателік орын алды:", error);
-      console.error("Толық қате сипаттамасы:", error?.response?.data || error?.message || error);
+      const errorStr = String(error?.response?.data || error?.message || error || "");
+      console.error("Толық қате сипаттамасы:", errorStr);
+      
+      const isCreditsError = errorStr.includes("depleted") || errorStr.includes("429") || errorStr.includes("RESOURCE_EXHAUSTED");
       
       // Қателерді өңдеу
-      const errorMessage = 'Кешіріңіз, жүйелік қателікке байланысты жауап бере алмаймын. Сұрағыңызды нақтылап қоюыңызға болады.';
+      let errorMessage = 'Кешіріңіз, жүйелік қателікке байланысты жауап бере алмаймын. Сұрағыңызды нақтылап қоюыңызға болады.';
+      if (isCreditsError) {
+        errorMessage = '⚠️ <b>Жүйелік қателік (429 Resource Exhausted / Credits Depleted):</b>\n\nБағдарламаның Gemini API кілтіндегі кредиттері (балансы) таусылған немесе шектеу қойылған. Бот жауап бере алуы үшін Google Cloud немесе AI Studio балансын толтырыңыз.\n\n<i>Сұрағыңызды кейінірек қайталап көріңіз.</i>';
+      }
+
       if (statusMessageId) {
         try {
-          await ctx.telegram.editMessageText(chatId, statusMessageId, undefined, errorMessage);
+          await ctx.telegram.editMessageText(chatId, statusMessageId, undefined, errorMessage, { parse_mode: 'HTML' });
         } catch (e) {
-          await ctx.reply(errorMessage);
+          await ctx.reply(errorMessage, { parse_mode: 'HTML' });
         }
       } else {
-        await ctx.reply(errorMessage);
+        await ctx.reply(errorMessage, { parse_mode: 'HTML' });
       }
     }
   });

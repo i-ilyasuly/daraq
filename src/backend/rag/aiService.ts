@@ -121,11 +121,11 @@ export async function generateAnswer(chatId: string, query: string, context: Sea
       { role: 'user', parts: [{ text: currentPrompt }] }
     ];
 
-    console.log(`[⏳] LLM-ге сұраныс жіберілуде (gemini-3.1-pro-preview)...`);
+    console.log(`[⏳] LLM-ге сұраныс жіберілуде (gemini-3.5-flash)...`);
     let response;
     try {
       response = await ai.models.generateContent({
-        model: 'gemini-3.1-pro-preview',
+        model: 'gemini-3.5-flash',
         contents: contents,
         config: {
           systemInstruction: SYSTEM_PROMPT,
@@ -154,6 +154,16 @@ export async function generateAnswer(chatId: string, query: string, context: Sea
 
   } catch (error: any) {
     console.error("\n[❌] Жауап генерациялау барысында қателік орын алды (RAG/System Error):", error?.message || error);
+    const errorStr = String(error?.message || error || "");
+    const isCreditsError = errorStr.includes("depleted") || errorStr.includes("429") || errorStr.includes("RESOURCE_EXHAUSTED");
+    
+    if (isCreditsError) {
+      return {
+        answer: "⚠️ <b>Жүйелік қателік (429 Resource Exhausted / Credits Depleted):</b>\n\nБағдарламаның Gemini API кілтіндегі кредиттері (балансы) таусылған немесе шектеу қойылған. Бот жауап бере алуы үшін Google Cloud немесе AI Studio балансын толтырыңыз.\n\n<i>Сұрағыңызды кейінірек қайталап көріңіз.</i>",
+        sources: context
+      };
+    }
+    
     return {
       answer: "Кешіріңіз, жүйелік қателікке байланысты жауап бере алмаймын.",
       sources: context

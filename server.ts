@@ -5,6 +5,7 @@ import { setupBot } from "./src/backend/bot";
 import { db } from "./src/backend/db/firestore";
 import { qdrant } from "./src/backend/db/qdrant";
 import { storage } from "./src/backend/db/storage";
+import { initTestData } from "./src/backend/initData";
 import { createServer as createViteServer } from "vite";
 
 async function startServer() {
@@ -13,7 +14,10 @@ async function startServer() {
 
   // Initialize DB & Storage connections (imports already initialize them if env is present)
   if (db) console.log('Firestore connected');
-  if (qdrant) console.log('Qdrant connected');
+  if (qdrant) {
+    console.log('Qdrant connected');
+    await initTestData();
+  }
   if (storage) console.log('Storage connected');
 
   // Initialize Telegram Bot
@@ -25,6 +29,10 @@ async function startServer() {
   // API Routes
   app.get("/api/health", (req, res) => {
     res.json({ status: "ok" });
+  });
+
+  app.get("/api/env", (req, res) => {
+    res.json({ node_env: process.env.NODE_ENV, appUrl: process.env.APP_URL });
   });
 
   // Telegram webhook route

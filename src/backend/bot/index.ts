@@ -172,14 +172,21 @@ export function setupBot() {
   });
 
   // Вэбхук арқылы немесе ұзақ сұрау арқылы қосу
-  if (appUrl) {
+  const isProduction = process.env.NODE_ENV === 'production';
+
+  if (isProduction && appUrl) {
     const webhookPath = `/api/bot-webhook`;
     bot.telegram.setWebhook(`${appUrl}${webhookPath}`).then(() => {
       console.log(`Webhook set at ${appUrl}${webhookPath}`);
     });
   } else {
-    console.log('APP_URL not defined, attempting to start bot in pulling mode.');
-    bot.launch();
+    console.log('Development mode detected or APP_URL missing. Starting bot in polling mode...');
+    bot.telegram.deleteWebhook({ drop_pending_updates: true }).then(() => {
+      bot.launch({ dropPendingUpdates: true });
+      console.log('Bot started in polling mode.');
+    }).catch((error: unknown) => {
+      console.error('Error starting polling mode:', error);
+    });
   }
 
   return bot;

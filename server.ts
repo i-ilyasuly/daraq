@@ -63,10 +63,22 @@ async function startServer() {
 
   // Graceful stop
   process.once('SIGINT', () => {
-    if (bot) bot.stop('SIGINT')
+    if (bot) {
+      try {
+        bot.stop('SIGINT');
+      } catch (e: any) {
+        console.log('Bot stopped (SIGINT):', e.message);
+      }
+    }
   })
   process.once('SIGTERM', () => {
-    if (bot && typeof bot.stop === 'function') bot.stop('SIGTERM')
+    if (bot && typeof bot.stop === 'function') {
+      try {
+        bot.stop('SIGTERM');
+      } catch (e: any) {
+        console.log('Bot stopped (SIGTERM):', e.message);
+      }
+    }
   })
 
   app.listen(PORT, "0.0.0.0", () => {

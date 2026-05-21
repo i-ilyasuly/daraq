@@ -10,7 +10,7 @@ import { createServer as createViteServer } from "vite";
 
 async function startServer() {
   const app = express();
-  const PORT = process.env.PORT || 3000;
+  const PORT = Number(process.env.PORT || 3000);
 
   // Initialize DB & Storage connections (imports already initialize them if env is present)
   if (db) console.log('Firestore connected');

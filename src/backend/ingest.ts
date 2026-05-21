@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import pdf from 'pdf-parse';
+import { PDFParse } from 'pdf-parse';
 import { v4 as uuidv4 } from 'uuid';
 import { GoogleGenAI } from '@google/genai';
 import 'dotenv/config';
@@ -19,12 +19,11 @@ const BUCKET_NAME = process.env.GCS_BUCKET_NAME || 'daraq_books_bucket';
  */
 async function extractTextFromPDF(filePath: string) {
   const dataBuffer = fs.readFileSync(filePath);
-  const data = await pdf(dataBuffer);
-  // data.text ішіндегі мәтін. 
-  // Шынайы продакшн жүйесінде әр бетті бөлек pdfjs арқылы алу тиімдірек.
-  // Қазір біз оны шартты түрде парақтарға бөліп симуляциялаймыз немесе
-  // мәтінді біртұтас оқып, шамамен бөлеміз.
-  return data.text;
+  const parser = new PDFParse({ data: dataBuffer });
+  const textResult = await parser.getText();
+  await parser.destroy();
+  // textResult.text inside textResult
+  return textResult.text;
 }
 
 /**

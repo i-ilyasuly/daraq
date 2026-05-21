@@ -231,13 +231,23 @@ export function setupBot() {
   });
 
   // Вэбхук арқылы немесе ұзақ сұрау арқылы қосу
-  const isProduction = process.env.NODE_ENV === 'production';
+  const isCloudRun = process.env.K_SERVICE !== undefined;
+  const isProduction = process.env.NODE_ENV === 'production' || isCloudRun;
+  const hasAppUrl = appUrl && appUrl !== "MY_APP_URL" && !appUrl.includes("your_") && !appUrl.includes("localhost");
 
-  if (isProduction && appUrl) {
-    const webhookPath = `/api/bot-webhook`;
-    bot.telegram.setWebhook(`${appUrl}${webhookPath}`).then(() => {
-      console.log(`Webhook set at ${appUrl}${webhookPath}`);
-    });
+  if (isProduction) {
+    if (hasAppUrl) {
+      const webhookPath = `/api/bot-webhook`;
+      bot.telegram.setWebhook(`${appUrl}${webhookPath}`).then(() => {
+        console.log(`[🌐] Webhook successfully set at ${appUrl}${webhookPath}`);
+      }).catch((err) => {
+        console.error(`[❌] Failed to set webhook at ${appUrl}${webhookPath}:`, err);
+      });
+    } else {
+      console.error(`[❌] ӨНДІРІСТІК РЕЖИМ (Cloud Run) анықталды, бірақ 'APP_URL' айнымалысы дұрыс орнатылмаған немесе "MY_APP_URL" болып тұр.`);
+      console.error(`[❌] Cloud Run-да 409 Conflict қателерінің алдын алу үшін Polling-пен қосу тоқтатылды (қауіпсіздік үшін бұғатталды).`);
+      console.error(`[💡] ШЕШІМІ: Google Cloud Console-де Daraq Cloud Run қызметінің баптауларына (Variables / Secret) барып, APP_URL айнымалысына Cloud Run сілтемеңізді енгізіңіз (мысалы: APP_URL=https://daraq-xxxxxx.run.app).`);
+    }
   } else {
     console.log('Development mode detected or APP_URL missing. Starting bot in polling mode...');
     bot.telegram.deleteWebhook({ drop_pending_updates: true }).then(() => {

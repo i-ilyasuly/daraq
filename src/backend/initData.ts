@@ -1,10 +1,9 @@
 import { qdrant } from './db/qdrant';
-import { GoogleGenAI } from '@google/genai';
+import { ai } from './rag/aiClient';
 import { v4 as uuidv4 } from 'uuid';
 import 'dotenv/config';
 
 const QDRANT_COLLECTION = 'daraq_books';
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
 export async function initTestData() {
   if (!qdrant) {
@@ -21,7 +20,7 @@ export async function initTestData() {
     if (!exists) {
       console.log(`Collection ${QDRANT_COLLECTION} not found. Creating...`);
       await qdrant.createCollection(QDRANT_COLLECTION, {
-        vectors: { size: 1536, distance: 'Cosine' }
+        vectors: { size: 768, distance: 'Cosine' }
       });
       console.log(`Qdrant collection created: ${QDRANT_COLLECTION}`);
       needsIngest = true;
@@ -49,11 +48,11 @@ export async function initTestData() {
         const text = testTexts[i];
         
         const embeddingResponse = await ai.models.embedContent({
-          model: 'gemini-embedding-2-preview',
+          model: 'text-embedding-005',
           contents: text,
           config: {
             taskType: 'RETRIEVAL_DOCUMENT',
-            outputDimensionality: 1536
+            outputDimensionality: 768
           }
         });
         

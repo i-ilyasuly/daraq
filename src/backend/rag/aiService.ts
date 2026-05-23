@@ -1,17 +1,7 @@
-import { GoogleGenAI } from '@google/genai';
 import { db } from '../db/firestore';
 import { SearchResult } from './searchService';
+import { ai } from './aiClient';
 import 'dotenv/config';
-
-// 1. Gemini Client қосылымы
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-  httpOptions: {
-    headers: {
-      'User-Agent': 'aistudio-build',
-    }
-  }
-});
 
 // 2. LLM-ге арналған System Prompt (Жүйелік нұсқаулық)
 const SYSTEM_PROMPT = `Сен Ханафи мазһабы бойынша діни көмекшісің (Daraq). 
@@ -127,11 +117,11 @@ export async function generateAnswer(chatId: string, query: string, context: Sea
       { role: 'user', parts: [{ text: currentPrompt }] }
     ];
 
-    console.log(`[⏳] LLM-ге сұраныс жіберілуде (gemini-3.5-flash)...`);
+    console.log(`[⏳] LLM-ге сұраныс жіберілуде (gemini-3-flash-preview)...`);
     let response;
     try {
       response = await ai.models.generateContent({
-        model: 'gemini-3.5-flash',
+        model: 'gemini-3-flash-preview',
         contents: contents,
         config: {
           systemInstruction: SYSTEM_PROMPT,
@@ -169,10 +159,10 @@ export async function generateAnswer(chatId: string, query: string, context: Sea
       typeof error === 'object' ? JSON.stringify(error) : ""
     ].join(" ").toLowerCase();
 
-    const isLeaked = errorStr.includes("leaked") || errorStr.includes("leak") || errorStr.includes("security") || errorStr.includes("permission_denied") && errorStr.includes("403");
+    const isLeaked = errorStr.includes("leaked") || errorStr.includes("leak") || errorStr.includes("security");
     const isCreditsError = errorStr.includes("depleted") || errorStr.includes("429") || errorStr.includes("resource_exhausted") || errorStr.includes("quota");
     const isPermissionError = errorStr.includes("permission_denied") || errorStr.includes("403");
-    const isInvalidKey = errorStr.includes("invalid") || errorStr.includes("not found") || (errorStr.includes("api key") && (errorStr.includes("wrong") || errorStr.includes("bad")));
+    const isInvalidKey = errorStr.includes("invalid") || (errorStr.includes("not found") && errorStr.includes("key")) || (errorStr.includes("api key") && (errorStr.includes("wrong") || errorStr.includes("bad")));
 
     if (isLeaked) {
       return {

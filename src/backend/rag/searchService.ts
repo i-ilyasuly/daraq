@@ -1,16 +1,7 @@
-import { GoogleGenAI } from '@google/genai';
 import { qdrant } from '../db/qdrant';
+import { ai } from './aiClient';
 import 'dotenv/config';
 
-// Gemini Client іске қосу
-const ai = new GoogleGenAI({
-  apiKey: process.env.GEMINI_API_KEY,
-  httpOptions: {
-    headers: {
-      'User-Agent': 'aistudio-build',
-    }
-  }
-});
 const QDRANT_COLLECTION = 'daraq_books';
 
 // Қайтарылатын құрылым (Interface)
@@ -34,11 +25,11 @@ export async function searchAnswers(query: string): Promise<SearchResult[]> {
     // 1. Сұрақты векторға айналдыру
     console.log(`[⏳] Сұрақты векторға (Embeddings) айналдыру...`);
     const embeddingResponse = await ai.models.embedContent({
-      model: 'gemini-embedding-2-preview',
+      model: 'gemini-embedding-2',
       contents: query,
       config: {
         taskType: 'RETRIEVAL_QUERY',
-        outputDimensionality: 1536 // Ingest кезіндегі өлшемге сәйкес
+        outputDimensionality: 768 // Ingest кезіндегі өлшемге сәйкес (text-multilingual-embedding-002)
       }
     });
 

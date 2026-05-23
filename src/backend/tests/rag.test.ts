@@ -70,6 +70,9 @@ import { formatTelegramMessage } from '../bot/index';
 describe('Daraq Bot Subsystem Tests', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
   });
 
   // ==========================================

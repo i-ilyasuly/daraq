@@ -4,7 +4,7 @@ import 'dotenv/config'; // Load .env
 import { setupBot } from "./src/backend/bot";
 import { db } from "./src/backend/db/firestore";
 import { qdrant } from "./src/backend/db/qdrant";
-import { storage } from "./src/backend/db/storage";
+import { storage } from "./src/backend/storage";
 import { initTestData } from "./src/backend/initData";
 import { createServer as createViteServer } from "vite";
 

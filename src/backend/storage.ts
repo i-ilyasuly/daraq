@@ -69,7 +69,7 @@ export function initStorage() {
   let projectId;
   let credentials;
 
-  const keyPath = process.env.FIREBASE_KEY_PATH || './firebase-key.json';
+  const keyPath = process.env.GCS_KEY_PATH || process.env.FIREBASE_KEY_PATH || './gcp-service-account.json';
 
   try {
     const fullPath = path.resolve(process.cwd(), keyPath);

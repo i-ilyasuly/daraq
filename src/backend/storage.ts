@@ -1,3 +1,4 @@
+import './crypto-patch';
 import { Storage } from '@google-cloud/storage';
 import fs from 'fs';
 import path from 'path';
@@ -69,7 +70,7 @@ export function initStorage() {
   let projectId;
   let credentials;
 
-  const keyPath = process.env.GCS_KEY_PATH || process.env.FIREBASE_KEY_PATH || './gcp-service-account.json';
+  const keyPath = process.env.GCS_KEY_PATH || process.env.FIREBASE_KEY_PATH || './firebase-key.json';
 
   try {
     const fullPath = path.resolve(process.cwd(), keyPath);

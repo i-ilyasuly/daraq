@@ -1,3 +1,4 @@
+import "./src/backend/crypto-patch";
 import express from "express";
 import path from "path";
 import 'dotenv/config'; // Load .env

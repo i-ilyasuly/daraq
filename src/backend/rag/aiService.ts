@@ -173,7 +173,7 @@ export async function generateAnswer(chatId: string, query: string, context: Sea
 
     if (isCreditsError) {
       return {
-        answer: "⚠️ <b>Жүйелік қате (429 Resource Exhausted / Billing/Credits Depleted):</b>\n\nСіздің Gemini API кілтіңіздегі кредиттер (баланс) немесе квота таусылды. Бот жауап бере алуы үшін <a href=\"https://aistudio.google.com/\">Google AI Studio Settings</a> немесе Google Cloud billing-те балансыңызды толтырыңыз немесе жаңа API кілтін пайдаланыңыз.\n\nҚосымша ақпарат: <a href=\"https://ai.google.dev/gemini-api/docs/billing#prepay\">Gemini API Prepay Billing</a>",
+        answer: "⚠️ <b>Жүйелік қате (429 Resource Exhausted / Quota):</b>\n\nGoogle Cloud Vertex AI жүйесіндегі сұраныс квотасы таусылды немесе шегіне жетті. Біраз уақыттан соң қайталап көріңіз немесе Google Cloud Console арқылы квотаңызды көбейтіңіз.",
         sources: context
       };
     }
@@ -196,5 +196,87 @@ export async function generateAnswer(chatId: string, query: string, context: Sea
       answer: "Кешіріңіз, жүйелік қателікке байланысты жауап бере алмаймын.",
       sources: context
     };
+  }
+}
+
+/**
+ * Ағынды (Streaming) жауап генерациялау функциясы
+ */
+export async function generateAnswerStream(
+  chatId: string,
+  query: string,
+  context: SearchResult[],
+  onChunk: (currentFullText: string) => void
+): Promise<AnswerResult> {
+  console.log(`\n[🤖] Ағынды (streaming) жауап беру басталды (ChatID: ${chatId})`);
+  
+  try {
+    const contextText = context.map((c, i) => 
+      `[Дерек ${i + 1}] Кітап: "${c.book}", Бет: ${c.page}\nМәтін: ${c.text}`
+    ).join('\n\n');
+    
+    let currentPrompt = `Контекст (кітап мәтіндері):\n${contextText}\n\nПайдаланушы сұрағы: ${query}`;
+    const rawHistory = await getChatHistory(chatId);
+    
+    const history: {role: string, parts: {text: string}[]}[] = [];
+    for (const msg of rawHistory) {
+        if (history.length === 0) {
+            history.push(msg);
+        } else {
+            const lastMsg = history[history.length - 1];
+            if (lastMsg.role === msg.role) {
+                lastMsg.parts[0].text += `\n\n${msg.parts[0].text}`;
+            } else {
+                history.push(msg);
+            }
+        }
+    }
+    
+    if (history.length > 0 && history[history.length - 1].role === 'user') {
+        const lastUser = history.pop();
+        if (lastUser) {
+            currentPrompt = `[Алдыңғы хабарлама]: ${lastUser.parts[0].text}\n\n[Жаңа сұрақ]: ${currentPrompt}`;
+        }
+    }
+    
+    const contents = [
+      ...history,
+      { role: 'user', parts: [{ text: currentPrompt }] }
+    ];
+
+    console.log(`[⏳] LLM-ге ағынды (stream) сұраныс жіберілуде...`);
+    const responseStream = await ai.models.generateContentStream({
+      model: 'gemini-3-flash-preview',
+      contents: contents,
+      config: {
+        systemInstruction: SYSTEM_PROMPT,
+        temperature: 0.1,
+      }
+    });
+
+    let answerText = "";
+    for await (const chunk of responseStream) {
+      if (chunk.text) {
+        answerText += chunk.text;
+        onChunk(answerText);
+      }
+    }
+
+    if (!answerText) {
+      answerText = "Кешіріңіз, жауап құрастыру мүмкін болмады.";
+    }
+
+    console.log(`[✅] Ағынды жауап толығымен аяқталды.`);
+    
+    await saveToChatHistory(chatId, 'user', query); 
+    await saveToChatHistory(chatId, 'bot', answerText);
+
+    return {
+      answer: answerText,
+      sources: context
+    };
+  } catch (error: any) {
+    console.error("\n[❌] Ағынды жауап алу барысында қателік орын алды, кәдімгі режимге ауысамыз:", error?.message || error);
+    return generateAnswer(chatId, query, context);
   }
 }

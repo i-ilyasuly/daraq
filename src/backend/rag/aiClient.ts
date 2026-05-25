@@ -1,3 +1,4 @@
+import '../crypto-patch';
 import { GoogleGenAI } from '@google/genai';
 import crypto from 'crypto';
 import fs from 'fs';
@@ -35,10 +36,19 @@ export function validateServiceAccount(filePath: string): boolean {
 
 const serviceAccountPath = path.join(process.cwd(), 'gcp-service-account.json');
 
-// Егер файл жоқ болса, бірақ ENV ішінде мәліметтер болса, файлды жасап шығару:
+// Reconstruct if missing
 if (!fs.existsSync(serviceAccountPath) && process.env.FIREBASE_PRIVATE_KEY && process.env.FIREBASE_CLIENT_EMAIL) {
   try {
-    const pk = process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n');
+    let pk = process.env.FIREBASE_PRIVATE_KEY.trim();
+    if (pk.includes('\\n')) pk = pk.replace(/\\n/g, '\n');
+    
+    // Ensure standard PEM format
+    if (!pk.includes('-----BEGIN PRIVATE KEY-----')) {
+       const cleanKey = pk.replace(/-----BEGIN PRIVATE KEY-----|-----END PRIVATE KEY-----|\s+/g, '');
+       const chunks = cleanKey.match(/.{1,64}/g) || [];
+       pk = `-----BEGIN PRIVATE KEY-----\n${chunks.join('\n')}\n-----END PRIVATE KEY-----\n`;
+    }
+
     const content = JSON.stringify({
       type: "service_account",
       project_id: 'momyn-t1',
@@ -46,31 +56,34 @@ if (!fs.existsSync(serviceAccountPath) && process.env.FIREBASE_PRIVATE_KEY && pr
       client_email: process.env.FIREBASE_CLIENT_EMAIL,
     });
     fs.writeFileSync(serviceAccountPath, content, 'utf8');
-    console.log('[✅] Runtime: ENV арқылы gcp-service-account.json қайта жасалды.');
+    console.log('[✅] Runtime: gcp-service-account.json ("momyn-t1") қайта жасалды.');
   } catch (e) {
-    console.error("ENV-тан service-account файлын құру мүмкін болмады.", e);
+    console.error("Service-account файлын құру мүмкін болмады.", e);
   }
 }
 
-const isServiceAccountValid = validateServiceAccount(serviceAccountPath);
+// We always want to try Vertex AI with momyn-t1 first as per rules
+let saProjectId = 'momyn-t1'; 
+const hasServiceAccountFile = fs.existsSync(serviceAccountPath);
 
-const aiOptions: any = {};
-if (isServiceAccountValid) {
-  process.env.GOOGLE_APPLICATION_CREDENTIALS = serviceAccountPath;
-  aiOptions.vertexai = true;
-  aiOptions.project = 'momyn-t1';
-  aiOptions.location = 'us-central1';
-  console.log(`[🚀] Vertex AI (Service Account) белсенді. Жоба: ${aiOptions.project}`);
-} else {
-  aiOptions.apiKey = process.env.GEMINI_API_KEY;
-  console.log('[🚀] Google AI Studio API Key белсенді (Сыртықтың баламалы нұсқасы).');
-}
-
-aiOptions.httpOptions = {
-  headers: {
-    'User-Agent': 'aistudio-build',
+const aiOptions: any = {
+  httpOptions: {
+    headers: {
+      'User-Agent': 'aistudio-build',
+    }
   }
 };
+
+if (hasServiceAccountFile) {
+  process.env.GOOGLE_APPLICATION_CREDENTIALS = serviceAccountPath;
+  aiOptions.vertexai = true;
+  aiOptions.project = saProjectId;
+  aiOptions.location = 'us-central1';
+  console.log(`[🚀] Vertex AI (Service Account) дайындалды. Жоба: ${saProjectId}`);
+} else {
+  aiOptions.apiKey = process.env.GEMINI_API_KEY;
+  console.warn(`[⚠️] Google AI Studio API Key қолданылуда.`);
+}
 
 export const ai = new GoogleGenAI(aiOptions);
 
@@ -93,9 +106,31 @@ ai.models.generateContent = async function(args: any) {
   }
 };
 
+const originalGenerateContentStream = ai.models.generateContentStream.bind(ai.models);
+ai.models.generateContentStream = async function(args: any) {
+  try {
+    return await originalGenerateContentStream(args);
+  } catch (err: any) {
+    const errorStr = String(err?.message || err).toLowerCase();
+    const isNotFoundOrPermission = errorStr.includes("not found") || errorStr.includes("404") || errorStr.includes("permission_denied") || errorStr.includes("403");
+    
+    if (isNotFoundOrPermission && args.model !== 'gemini-2.5-flash') {
+      console.warn(`\n[⚠️] Vertex AI Stream: Сұралған "${args.model}" моделі табылмады немесе рұқсат жоқ.`);
+      console.warn(`[🔄] Сенімді әрі 100% тұрақты "gemini-2.5-flash" моделіне автоматты түрде ауысу жүзеге асырылуда...`);
+      args.model = 'gemini-2.5-flash';
+      return await originalGenerateContentStream(args);
+    }
+    throw err;
+  }
+};
+
 const originalEmbedContent = ai.models.embedContent.bind(ai.models);
 ai.models.embedContent = async function(args: any) {
   try {
+    // Vertex AI defaults to 'gemini-embedding-2-preview' for gemini-embedding-2
+    if (hasServiceAccountFile && args.model === 'gemini-embedding-2') {
+      args.model = 'gemini-embedding-2-preview';
+    }
     return await originalEmbedContent(args);
   } catch (err: any) {
     const errorStr = String(err?.message || err).toLowerCase();

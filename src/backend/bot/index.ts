@@ -1,8 +1,15 @@
 import { Telegraf, Markup } from 'telegraf';
 import { v4 as uuidv4 } from 'uuid';
 import sharp from 'sharp';
+import { Storage } from '@google-cloud/storage';
+import { storage as customStorage } from '../storage';
 import { searchAnswers } from '../rag/searchService';
-import { generateAnswer } from '../rag/aiService';
+import { generateAnswer, generateAnswerStream } from '../rag/aiService';
+import { ai } from '../rag/aiClient';
+
+const storage = customStorage || new Storage();
+// Fallback for dev: if you don't set it, it'll try this name
+const PROCESSED_BUCKET = process.env.PROCESSED_IMAGES_BUCKET || 'daraq-497018-daraq-processed-images';
 
 interface SourceInfo {
   book: string;
@@ -10,8 +17,27 @@ interface SourceInfo {
   imageUrl: string;
 }
 
-// Уақытша жад (пайдаланушы 🖼 Дәлел суретті көру басып қалса, осы жерден сурет метадатасы алынады)
+// ... original cache map
 const sourceCache = new Map<string, SourceInfo>();
+
+/**
+ * Қазақша кириллицаны латыншаға транслитерациялау функциясы
+ */
+function transliterateToLatin(text: string): string {
+  const map: { [key: string]: string } = {
+    'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd', 'е': 'e', 'ё': 'yo', 'ж': 'zh', 'з': 'z',
+    'и': 'i', 'й': 'y', 'к': 'k', 'л': 'l', 'м': 'm', 'н': 'n', 'о': 'o', 'п': 'p', 'р': 'r',
+    'с': 's', 'т': 't', 'у': 'u', 'ф': 'f', 'х': 'kh', 'ц': 'ts', 'ч': 'ch', 'ш': 'sh', 'щ': 'shch',
+    'ъ': '', 'ы': 'y', 'ь': '', 'э': 'e', 'ю': 'yu', 'я': 'ya',
+    'ә': 'ae', 'ғ': 'g', 'қ': 'q', 'ң': 'n', 'ө': 'o', 'ұ': 'u', 'ү': 'u', 'һ': 'h', 'і': 'i',
+    'А': 'A', 'Б': 'B', 'В': 'V', 'Г': 'G', 'Д': 'D', 'Е': 'E', 'Ё': 'Yo', 'Ж': 'Zh', 'З': 'Z',
+    'И': 'I', 'Й': 'Y', 'К': 'K', 'Л': 'L', 'M': 'M', 'Н': 'N', 'О': 'O', 'П': 'P', 'Р': 'R',
+    'С': 'S', 'Т': 'T', 'У': 'U', 'Ф': 'F', 'Х': 'Kh', 'Ц': 'Ts', 'Ч': 'Ch', 'Ш': 'Sh', 'Щ': 'Shch',
+    'Ы': 'Y', 'Э': 'E', 'Ю': 'Yu', 'Я': 'Ya',
+    'Ә': 'Ae', 'Ғ': 'G', 'Қ': 'Q', 'Ң': 'N', 'Ө': 'O', 'Ұ': 'U', 'Ү': 'U', 'Һ': 'H', 'І': 'I'
+  };
+  return text.split('').map(char => map[char] || char).join('');
+}
 
 /**
  * Сурет үстіне су белгісін (Watermark) салатын функция
@@ -31,17 +57,63 @@ async function addWatermark(imageUrl: string, bookName: string, pageNumber: numb
   let useFallbackWatermark = false;
 
   try {
-    const response = await fetch(imageUrl);
-    if (!response.ok) throw new Error("Суретті жүктеу мүмкін болмады");
-    const arrayBuffer = await response.arrayBuffer();
-    baseImageBuffer = Buffer.from(arrayBuffer);
+    const bucket = storage.bucket(PROCESSED_BUCKET);
     
-    // Бұл код dummy-image-content сынды жарамсыз суретті анықтап, қате лақтырады
+    // Мүмкін болатын барлық атау форматтары мен транслитерацияларды тізімдейміз
+    const safeBookName = bookName.replace(/[^a-zA-Zа-яА-Я0-9-_]/g, '_');
+    const latinBookRaw = transliterateToLatin(bookName);
+    const latinBookWithUnderscore = latinBookRaw.replace(/[^a-zA-Z0-9-_]/g, '_');
+    const latinBookNoSpacesOrPunctuation = latinBookRaw.replace(/[^a-zA-Z0-9]/g, '');
+
+    const possibleNames = [
+      // 1. Транслитерация бойынша (мысалы Oraza_qulshylygy)
+      `${latinBookWithUnderscore}/page_${pageNumber}.png`,
+      `${latinBookWithUnderscore}/page_${pageNumber}.jpg`,
+      `${latinBookWithUnderscore}/page_${pageNumber}.jpeg`,
+      // 2. Барлық бос орындар мүлдем жоқ транслитерация бойынша (мысалы Orazaqulshylygy немеse Zhumanamazy)
+      `${latinBookNoSpacesOrPunctuation}/page_${pageNumber}.png`,
+      `${latinBookNoSpacesOrPunctuation}/page_${pageNumber}.jpg`,
+      `${latinBookNoSpacesOrPunctuation}/page_${pageNumber}.jpeg`,
+      // 3. Кириллица бойынша тазаланған (мысалы Ораза_құлшылығы)
+      `${safeBookName}/page_${pageNumber}.png`,
+      `${safeBookName}/page_${pageNumber}.jpg`,
+      `${safeBookName}/page_${pageNumber}.jpeg`,
+      // 4. Тікелей берілген кітап атауы бойынша
+      `${bookName}/page_${pageNumber}.png`,
+      `${bookName}/page_${pageNumber}.jpg`,
+      `${bookName}/page_${pageNumber}.jpeg`,
+    ];
+
+    let fileToDownload: any = null;
+    let foundName = '';
+
+    for (const name of possibleNames) {
+      const f = bucket.file(name);
+      const [exists] = await f.exists();
+      if (exists) {
+        fileToDownload = f;
+        foundName = name;
+        break;
+      }
+    }
+
+    if (!fileToDownload) {
+      throw new Error(`Шынайы сурет GCS ішіндегі ізделген нұсқалардың ешбірінен табылмады. Қаралған жолдар: ${possibleNames.join(', ')}`);
+    }
+
+    console.log(`[🎯] Шынайы сурет табылды: ${foundName}`);
+    
+    // Суретті жүктеп алу
+    const [imageContent] = await fileToDownload.download();
+    baseImageBuffer = imageContent;
+    
+    // Сурет жарамдылығын sharp арқылы тексеру
     await sharp(baseImageBuffer).metadata();
   } catch (err) {
+    console.warn(`[⚠️] Жаппай суретті алу қатесі, fallback қосылады:`, err);
     useFallbackWatermark = true;
     
-    // Егер GCS-тен алынған сурет жарамсыз болса (MVP-дегі mock content), әдемі визуалды шаблон (placeholder) жасаймыз
+    // Егер GCS-тен алынған сурет жарамсыз болса (немесе табылмаса), әдемі визуалды шаблон (placeholder) жасаймыз
     const placeholderSvg = `
       <svg width="800" height="600" xmlns="http://www.w3.org/2000/svg">
         <!-- Background -->
@@ -112,6 +184,72 @@ export function formatTelegramMessage(text: string): string {
   return formatted;
 }
 
+/**
+ * Біз жауаптағы сөздер мен әрбір дереккөздегі мәтін сәйкестігін бағалаймыз.
+ * Бұл арқылы ең сәйкес келетін нақты парақты/дәлелді анықтаймыз.
+ */
+function chooseBestSource(answer: string, sources: any[]): any {
+  if (!sources || sources.length === 0) return null;
+  if (sources.length === 1) return sources[0];
+
+  const cleanText = (t: string) => t.toLowerCase().replace(/[^a-zA-Zа-яА-Яәғқңөұүһі]/g, ' ');
+  const answerWords = cleanText(answer)
+    .split(/\s+/)
+    .filter(w => w.length > 3);
+
+  if (answerWords.length === 0) {
+    return sources[0];
+  }
+
+  let bestSource = sources[0];
+  let maxScore = -1;
+
+  for (const src of sources) {
+    const srcText = cleanText(src.text);
+    let intersectionCount = 0;
+    
+    const uniqueAnswerWords = Array.from(new Set(answerWords));
+    for (const word of uniqueAnswerWords) {
+      if (srcText.includes(word)) {
+        intersectionCount++;
+      }
+    }
+
+    const ratio = intersectionCount / uniqueAnswerWords.length;
+    const combinedScore = ratio * 0.7 + (src.score || 0) * 0.3;
+    
+    if (combinedScore > maxScore) {
+      maxScore = combinedScore;
+      bestSource = src;
+    }
+  }
+
+  return bestSource;
+}
+
+/**
+ * Telegram Bot API sendMessageDraft әдісіне сұраныс жіберу
+ */
+async function sendDraftMessage(ctx: any, chatId: string, text: string, messageThreadId?: number, draftId?: string): Promise<any> {
+  try {
+    const payload: any = {
+      chat_id: chatId,
+      text: text,
+    };
+    if (messageThreadId) {
+      payload.message_thread_id = messageThreadId;
+    }
+    if (draftId) {
+      payload.draft_id = draftId;
+    }
+    const res = await ctx.telegram.callApi('sendMessageDraft', payload);
+    return res;
+  } catch (err: any) {
+    console.warn("[⚠️] Telegram Bot API 'sendMessageDraft' қолдамады немесе қате шықты:", err.message);
+    return null;
+  }
+}
+
 export function setupBot() {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const appUrl = process.env.APP_URL;
@@ -131,15 +269,83 @@ export function setupBot() {
     );
   });
 
+  // Темаларды (ораза, намаз) құру пәрмені
+  bot.command('create_topics', async (ctx) => {
+    const chatId = ctx.chat.id;
+
+    try {
+      await ctx.reply('⏳ "Ораза" және "Намаз" темаларын құру басталуда...');
+      
+      // Намаз тақырыбы (жеке чатқа бағыттауымыз мүмкін)
+      const namazTopic = await ctx.telegram.createForumTopic(chatId, 'Намаз');
+      // Ораза тақырыбы (жеке чатқа бағыттауымыз мүмкін)
+      const orazaTopic = await ctx.telegram.createForumTopic(chatId, 'Ораза');
+
+      return ctx.replyWithHTML(
+        `✅ Темалар сәтті құрылды!\n\n` +
+        `🕌 <b>Намаз</b> (Thread ID: <code>${namazTopic.message_thread_id}</code>)\n` +
+        `🌙 <b>Ораза</b> (Thread ID: <code>${orazaTopic.message_thread_id}</code>)\n\n` +
+        `Енді осы тақырыптар ішінде сұрақ қойып, жаңа жылдам ағынды (streaming) жауаптарды тексере аласыз!`
+      );
+    } catch (error: any) {
+      console.error('Темаларды құру кезінде қателік:', error);
+      return ctx.reply(`❌ Темаларды құру мүмкін болмады.\nҚате: ${error.message}`);
+    }
+  });
+
+  bot.command('newtopic', async (ctx) => {
+    const chatId = ctx.from.id;
+    try {
+      const topic = await ctx.telegram.createForumTopic(chatId, 'Жаңа тақырып');
+      await ctx.reply(`✅ Жаңа топик құрылды! Thread ID: ${topic.message_thread_id}. Енді сол жерге жазыңыз.`);
+    } catch (e: any) {
+      await ctx.reply(`❌ Жаңа топик құру мүмкін болмады: ${e.message}`);
+    }
+  });
+
+const renamedTopicsCache = new Set<string>();
+
   // 2. Сұрақты өңдеу
   bot.on('text', async (ctx) => {
     const chatId = String(ctx.chat.id);
     const query = ctx.message.text;
+    const chatType = ctx.chat.type;
+    const targetThreadId = ctx.message.message_thread_id;
     let statusMessageId: number | undefined;
+
+    // Пайдаланушы жеке чатта жаңа топик ашып, ішіне алғашқы сұрағын жазғанда (бот осы thread-ты бірінші рет көріп тұрса), AI арқылы атауын жаңартамыз
+    if (chatType === 'private' && targetThreadId) {
+      const cacheKey = `${chatId}_${targetThreadId}`;
+      if (!renamedTopicsCache.has(cacheKey)) {
+        renamedTopicsCache.add(cacheKey);
+
+        // Фондық режимде (async) Vertex AI арқылы сұрақты талдап, топик атын өзгертеміз
+        (async () => {
+          try {
+            const prompt = `Сен Telegram тобындағы тақырыпқа (forum topic) өте қысқа, 2-3 сөзден тұратын атау және сәйкес эмодзи ойлап табуың керек. \n\nАлғашқы сұрақ: "${query}"\n\nТалаптар:\n1. 1 эмодзи + 2 немесе 3 сөз.\n2. Атау қазақ тілінде болуы міндетті.\n3. Ешқандай қосымша мәтінсіз, тек атауды қайтар.\nМысал: 🌙 Ораза пайдалары`;
+            const res = await ai.models.generateContent({
+              model: 'gemini-3-flash-preview',
+              contents: prompt
+            });
+            let newName = res.text?.trim().replace(/\n/g, ' ');
+            if (newName) {
+              // Telegram шектеуі: тақырып аты 128 таңбадан аспауы тиіс
+              newName = newName.substring(0, 128);
+              await ctx.telegram.editForumTopic(chatId, targetThreadId, { name: newName });
+              console.log(`[AI] Жеке чаттағы Топик аты өзгертілді: ${newName}`);
+            }
+          } catch(e) {
+            console.error('[AI] Топик атын генерациялау кезінде қателік:', e);
+          }
+        })();
+      }
+    }
 
     try {
       // Күту мәртебесі: Ізделуде
-      const statusMsg = await ctx.reply('⏳ Ізделуде...');
+      const statusMsg = await ctx.telegram.sendMessage(chatId, '⏳ Ізделуде...', {
+        message_thread_id: targetThreadId
+      } as any);
       statusMessageId = statusMsg.message_id;
 
       // 1. Дәлелдер іздеу
@@ -148,8 +354,45 @@ export function setupBot() {
       // Күту мәртебесі: Тексерілуде
       await ctx.telegram.editMessageText(chatId, statusMessageId, undefined, '📖 Дәлелдер тексерілуде...');
 
-      // 2. LLM арқылы жауап генерациялау
-      const answerData = await generateAnswer(chatId, query, searchResults);
+      // 2. LLM арқылы ағынды (streaming) жауап генерациялау
+      let currentDraftId: string | undefined;
+      let lastEditTime = Date.now();
+      let lastSentText = "";
+      let usedDraftApi = false;
+
+      const answerData = await generateAnswerStream(chatId, query, searchResults, async (currentFullText) => {
+        const plainText = currentFullText.replace(/<[^>]*>?/gm, ''); // HTML тегтерін тазалаймыз
+        if (!plainText.trim() || plainText === lastSentText) return;
+
+        // 1. Алдымен жаңа sendMessageDraft-ты байқап көреміз (жылдам, ешқандай 1500мс шектеусіз)
+        const draftRes = await sendDraftMessage(ctx, chatId, plainText + ' ✍️...', targetThreadId, currentDraftId);
+        if (draftRes && draftRes.draft_id) {
+          if (statusMessageId) {
+            try {
+              await ctx.telegram.deleteMessage(chatId, statusMessageId);
+              statusMessageId = undefined;
+            } catch (e) {
+              // Елемейміз
+            }
+          }
+          currentDraftId = draftRes.draft_id;
+          lastSentText = plainText;
+          usedDraftApi = true;
+          return;
+        }
+
+        // 2. Fallback: Егер sendMessageDraft жұмыс істемесе, бұрынғыша editMessageText қабылдаймыз (әр 800мс сайын)
+        const now = Date.now();
+        if (now - lastEditTime >= 800) {
+          try {
+            await ctx.telegram.editMessageText(chatId, statusMessageId, undefined, plainText + ' ✍️...');
+            lastEditTime = now;
+            lastSentText = plainText;
+          } catch (e) {
+            // Қателерді елемейміз
+          }
+        }
+      });
 
       let finalMessage = formatTelegramMessage(answerData.answer);
 
@@ -160,8 +403,8 @@ export function setupBot() {
       // 3. Батырмаларды құрастыру (Егер дәлелдер табылса)
       let inlineKeyboard: any = null;
       if (answerData.sources && answerData.sources.length > 0) {
-        // Ең сенімді 1-ші дәлелді батырмаға ілеміз
-        const bestSource = answerData.sources[0];
+        // Ең сенімді әрі жауапқа ең сәйкес келетін дәлелді батырмаға ілеміз
+        const bestSource = chooseBestSource(answerData.answer, answerData.sources) || answerData.sources[0];
         const sourceId = uuidv4().substring(0, 8); // Қысқа ID (Telegram Callback Data Limit 64 bytes)
         
         sourceCache.set(sourceId, {
@@ -175,19 +418,29 @@ export function setupBot() {
         ]);
       }
 
-      // Жауапты жіберу және ескі хабарламаны өшіру
-      await ctx.telegram.deleteMessage(chatId, statusMessageId);
-      
-      const extraOptions = inlineKeyboard ? Object.assign({ parse_mode: 'HTML' }, inlineKeyboard) : { parse_mode: 'HTML' };
-      
+      const extraOptions = inlineKeyboard 
+        ? Object.assign({ parse_mode: 'HTML' }, inlineKeyboard, targetThreadId ? { message_thread_id: targetThreadId } : {}) 
+        : (targetThreadId ? { parse_mode: 'HTML', message_thread_id: targetThreadId } : { parse_mode: 'HTML' });
+
+      // Біз әрқашан уақытша күту немесе ескі хабарламаны өшіреміз
+      if (statusMessageId) {
+        try {
+          await ctx.telegram.deleteMessage(chatId, statusMessageId);
+        } catch (e) {
+          // Елемейміз
+        }
+      }
+
+      // Финалдық хабарламаны жібереміз
       try {
-        await ctx.reply(finalMessage, extraOptions);
+        await ctx.telegram.sendMessage(chatId, finalMessage, extraOptions);
       } catch (replyError) {
         console.error("[⚠️] HTML форматымен жіберу қатесі, таза мәтін жіберілуде:", replyError);
-        // Html тегтерін алып тастау
         const plainText = finalMessage.replace(/<[^>]*>?/gm, '');
-        const plainOptions = inlineKeyboard ? inlineKeyboard : undefined;
-        await ctx.reply(plainText, plainOptions);
+        const plainOptions = inlineKeyboard 
+          ? Object.assign({}, inlineKeyboard, targetThreadId ? { message_thread_id: targetThreadId } : {})
+          : (targetThreadId ? { message_thread_id: targetThreadId } : undefined);
+        await ctx.telegram.sendMessage(chatId, plainText, plainOptions);
       }
 
     } catch (error: any) {
@@ -200,17 +453,17 @@ export function setupBot() {
       // Қателерді өңдеу
       let errorMessage = 'Кешіріңіз, жүйелік қателікке байланысты жауап бере алмаймын. Сұрағыңызды нақтылап қоюыңызға болады.';
       if (isCreditsError) {
-        errorMessage = '⚠️ <b>Жүйелік қате (429 Resource Exhausted / Billing/Credits Depleted):</b>\n\nСіздің Gemini API кілтіңіздегі кредиттер (баланс) немесе квота таусылды. Бот жауап бере алуы үшін <a href="https://aistudio.google.com/">Google AI Studio Settings</a> немесе Google Cloud billing-те балансыңызды толтырыңыз немесе жаңа API кілтін пайдаланыңыз.\n\nҚосымша ақпарат: <a href="https://ai.google.dev/gemini-api/docs/billing#prepay">Gemini API Prepay Billing</a>';
+        errorMessage = '⚠️ <b>Жүйелік қате (429 Resource Exhausted / Quota):</b>\n\nGoogle Cloud Vertex AI жүйесіндегі сұраныс квотасы таусылды немесе шегіне жетті. Біраз уақыттан соң қайталап көріңіз немесе Google Cloud Console арқылы квотаңызды көбейтіңіз.';
       }
 
       if (statusMessageId) {
         try {
           await ctx.telegram.editMessageText(chatId, statusMessageId, undefined, errorMessage, { parse_mode: 'HTML' });
         } catch (e) {
-          await ctx.reply(errorMessage, { parse_mode: 'HTML' });
+          await ctx.telegram.sendMessage(chatId, errorMessage, { parse_mode: 'HTML', message_thread_id: targetThreadId } as any);
         }
       } else {
-        await ctx.reply(errorMessage, { parse_mode: 'HTML' });
+        await ctx.telegram.sendMessage(chatId, errorMessage, { parse_mode: 'HTML', message_thread_id: targetThreadId } as any);
       }
     }
   });

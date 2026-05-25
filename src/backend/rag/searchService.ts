@@ -29,7 +29,7 @@ export async function searchAnswers(query: string): Promise<SearchResult[]> {
       contents: query,
       config: {
         taskType: 'RETRIEVAL_QUERY',
-        outputDimensionality: 768 // Ingest кезіндегі өлшемге сәйкес (text-multilingual-embedding-002)
+        outputDimensionality: 1536
       }
     });
 

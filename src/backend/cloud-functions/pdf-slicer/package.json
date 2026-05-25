@@ -1,0 +1,17 @@
+{
+  "name": "pdf-slicer",
+  "version": "1.0.0",
+  "description": "Event-driven PDF to Image slicer (Cloud Functions)",
+  "main": "index.js",
+  "engines": {
+    "node": "20"
+  },
+  "scripts": {
+    "start": "functions-framework --target=processNewPdf"
+  },
+  "dependencies": {
+    "@google-cloud/functions-framework": "^3.3.0",
+    "@google-cloud/storage": "^7.7.0",
+    "pdf-img-convert": "^1.2.1"
+  }
+}

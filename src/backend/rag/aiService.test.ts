@@ -59,7 +59,7 @@ describe('aiService (Agentic RAG)', () => {
       expect(onChunk).toHaveBeenNthCalledWith(2, 'Hello world!');
       expect(res.answer).toBe('Hello world!');
       expect(res.sources).toEqual([]);
-      expect(onAction).toHaveBeenCalledWith(`Сұрақты талдаудамын...`);
+      expect(onAction).not.toHaveBeenCalled();
     });
 
     it('calls tool, searches database, and handles subsequent stream', async () => {
@@ -89,10 +89,8 @@ describe('aiService (Agentic RAG)', () => {
       const res = await generateAgentAnswerStream('chat_2', 'what is namaz?', onChunk, onAction);
 
       // Verify Actions
-      expect(onAction).toHaveBeenCalledWith(`Сұрақты талдаудамын...`);
-      expect(onAction).toHaveBeenCalledWith(`Жадыны қараудамын...`);
-      expect(onAction).toHaveBeenCalledWith(`Дерекқордан іздеудемін...`);
-      expect(onAction).toHaveBeenCalledWith(`Жауапты құрастырудамын...`);
+      expect(onAction).toHaveBeenCalledWith('📖 Дерекқордан ізделуде...');
+      expect(onAction).toHaveBeenCalledWith('📖 Дәлелдер тексерілуде...');
       
       // Verify Function Calling behavior
       expect(searchService.searchAnswers).toHaveBeenCalledWith('namaz');
@@ -138,10 +136,8 @@ describe('aiService (Agentic RAG)', () => {
       const res = await generateAgentAnswerStream('chat_4', '2:183 аяты', onChunk, onAction);
 
       // Verify actions
-      expect(onAction).toHaveBeenCalledWith(`Сұрақты талдаудамын...`);
-      expect(onAction).toHaveBeenCalledWith(`Жадыны қараудамын...`);
-      expect(onAction).toHaveBeenCalledWith(`Аяттарды қараудамын...`);
-      expect(onAction).toHaveBeenCalledWith(`Жауапты құрастырудамын...`);
+      expect(onAction).toHaveBeenCalledWith('📖 Құран аяттары ізделуде...');
+      expect(onAction).toHaveBeenCalledWith('📖 Дәлелдер тексерілуде...');
       
       // Verify Function Calling behavior
       expect(quranService.fetchSingleVerse).toHaveBeenCalledWith('2:183');

@@ -368,7 +368,7 @@ const renamedTopicsCache = new Set<string>();
             const prompt = `Сен Telegram тобындағы тақырыпқа (forum topic) өте қысқа, 2-3 сөзден тұратын атау және сәйкес эмодзи ойлап табуың керек. \n\nАлғашқы сұрақ: "${query}"\n\nТалаптар:\n1. 1 эмодзи + 2 немесе 3 сөз. Кез келген сәйкес келетін смайликті (эмодзи) еркін таңда, ешқандай шектеу жоқ.\n2. Атау қазақ тілінде болуы міндетті.\n3. Ешқандай қосымша мәтінсіз, тек атауды қайтар.\nМысал: 🌙 Ораза пайдалары`;
             
             const aiPromise = ai.models.generateContent({
-              model: 'gemini-3-flash-preview', // User requested this model
+              model: 'gemini-3.1-flash-lite', // User requested this model
               contents: prompt
             });
             
@@ -378,37 +378,25 @@ const renamedTopicsCache = new Set<string>();
 
             topicNamePromise = Promise.race([aiPromise, timeoutPromise]).then(res => {
               let newName = res.text?.trim().replace(/\n/g, ' ');
-              if (newName && newName.length > 2) {
+              if (newName) {
                 return newName.substring(0, 128);
               }
-              throw new Error("Empty or invalid name");
+              return undefined;
             }).catch(async (err) => {
-              console.warn('[AI] gemini-3-flash-preview қатесі немесе күту уақыты аяқталды (Timeout), gemini-2.5-flash моделіне ауысамыз:', err.message || err);
+              console.warn('[AI] gemini-3.1-flash-lite қатесі немесе күту уақыты аяқталды (Timeout), gemini-2.5-flash моделіне ауысамыз:', err.message || err);
               try {
-                const fallbackAiPromise = ai.models.generateContent({
+                const fallbackRes = await ai.models.generateContent({
                   model: 'gemini-2.5-flash',
                   contents: prompt
                 });
-                const fallbackTimeoutPromise = new Promise<any>((_, reject) => 
-                  setTimeout(() => reject(new Error("Timeout fallback")), 1500)
-                );
-                
-                const fallbackRes = await Promise.race([fallbackAiPromise, fallbackTimeoutPromise]);
                 let fallbackName = fallbackRes.text?.trim().replace(/\n/g, ' ');
-                if (fallbackName && fallbackName.length > 2) {
+                if (fallbackName) {
                   return fallbackName.substring(0, 128);
                 }
-              } catch(fallbackErr: any) {
-                console.error('[AI] Fallback Топик атын генерациялау кезінде қателік:', fallbackErr.message || fallbackErr);
+              } catch(fallbackErr) {
+                console.error('[AI] Fallback Топик атын генерациялау кезінде қателік:', fallbackErr);
               }
-              
-              // Егер екі модель де сәтсіз болса, пайдаланушы сұрағының алғашқы 3 сөзін тақырып аты етеміз
-              const cleanQuery = query.replace(/[?.,!;:#@*()_+=-\[\]{}]/g, '').trim();
-              const words = cleanQuery.split(/\s+/).filter(w => w.length > 1).slice(0, 3).join(' ');
-              if (words.length > 2) {
-                return `❓ ${words}`;
-              }
-              return '❓ Сұрақ-жауап';
+              return undefined;
             });
           }
         }

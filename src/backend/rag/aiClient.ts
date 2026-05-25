@@ -108,50 +108,20 @@ ai.models.generateContent = async function(args: any) {
 
 const originalGenerateContentStream = ai.models.generateContentStream.bind(ai.models);
 ai.models.generateContentStream = async function(args: any) {
-  const originalModel = args.model;
-
-  let stream: any;
   try {
-    stream = await originalGenerateContentStream(args);
+    return await originalGenerateContentStream(args);
   } catch (err: any) {
     const errorStr = String(err?.message || err).toLowerCase();
-    const isErrorToFallback = errorStr.includes("not found") || errorStr.includes("404") || errorStr.includes("permission_denied") || errorStr.includes("403") || errorStr.includes("429") || errorStr.includes("quota") || errorStr.includes("resource_exhausted") || errorStr.includes("network error") || errorStr.includes("failed to fetch") || errorStr.includes("invalid argument");
+    const isNotFoundOrPermission = errorStr.includes("not found") || errorStr.includes("404") || errorStr.includes("permission_denied") || errorStr.includes("403") || errorStr.includes("429") || errorStr.includes("quota") || errorStr.includes("resource_exhausted");
     
-    if (isErrorToFallback && originalModel !== 'gemini-2.5-flash') {
-      console.warn(`\n[⚠️] Vertex AI Stream Init Catch: Сұралған "${originalModel}" моделі табылмады, қате немесе рұқсат жоқ.`);
+    if (isNotFoundOrPermission && args.model !== 'gemini-2.5-flash') {
+      console.warn(`\n[⚠️] Vertex AI Stream: Сұралған "${args.model}" моделі табылмады немесе рұқсат/квота жоқ.`);
       console.warn(`[🔄] Сенімді әрі 100% тұрақты "gemini-2.5-flash" моделіне автоматты түрде ауысу жүзеге асырылуда...`);
-      const fallbackArgs = { ...args, model: 'gemini-2.5-flash' };
-      return await originalGenerateContentStream(fallbackArgs);
+      args.model = 'gemini-2.5-flash';
+      return await originalGenerateContentStream(args);
     }
     throw err;
   }
-
-  const asyncIterableWrapper = {
-    [Symbol.asyncIterator]: async function* () {
-      try {
-        for await (const chunk of stream) {
-          yield chunk;
-        }
-      } catch (err: any) {
-        const errorStr = String(err?.message || err).toLowerCase();
-        const isErrorToFallback = errorStr.includes("not found") || errorStr.includes("404") || errorStr.includes("permission_denied") || errorStr.includes("403") || errorStr.includes("429") || errorStr.includes("quota") || errorStr.includes("resource_exhausted") || errorStr.includes("network error") || errorStr.includes("failed to fetch") || errorStr.includes("invalid argument");
-        
-        if (isErrorToFallback && originalModel !== 'gemini-2.5-flash') {
-          console.warn(`\n[⚠️] Vertex AI Stream Iteration Catch: Ағын барысында қате орын алды (Модель: "${originalModel}"). Қате: ${err.message || err}`);
-          console.warn(`[🔄] Сенімді әрі 100% тұрақты "gemini-2.5-flash" моделіне ауысып, ағынды жалғастырамыз...`);
-          const fallbackArgs = { ...args, model: 'gemini-2.5-flash' };
-          const fallbackStream = await originalGenerateContentStream(fallbackArgs);
-          for await (const fbChunk of fallbackStream) {
-            yield fbChunk;
-          }
-          return;
-        }
-        throw err;
-      }
-    }
-  };
-
-  return asyncIterableWrapper as any;
 };
 
 const originalEmbedContent = ai.models.embedContent.bind(ai.models);

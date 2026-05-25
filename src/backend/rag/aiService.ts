@@ -1,18 +1,79 @@
 import { db } from '../db/firestore';
-import { SearchResult } from './searchService';
+import { SearchResult, searchAnswers } from './searchService';
 import { ai } from './aiClient';
+import { fetchSingleVerse, searchQuran } from './quranService';
+import { Type } from '@google/genai';
 import 'dotenv/config';
 
 // 2. LLM-ге арналған System Prompt (Жүйелік нұсқаулық)
 const SYSTEM_PROMPT = `Сен Ханафи мазһабы бойынша діни көмекшісің (Daraq). 
-Жауапты тек төменде берілген контекстке (кітап мәтіндеріне) сүйеніп қана, қазақ тілінде бер. 
+Пайдаланушы сұрағына жауап беру үшін МІНДЕТТІ ТҮРДЕ "searchDatabase" немесе "get_quran_verse" сияқты құралдарды (Tools) қолданып іздеу жаса! 
+• Егер пайдаланушы Құран аяттары, сүрелер немесе Құран мазмұны туралы сұраса (мысалы 'аят', 'сүре', немесе белгілі бір Құран тақырыбы) "get_quran_verse" құралын МІНДЕТТІ ТҮРДЕ қолдан.
+• Ал басқа жалпы діни сұрақтарға, фиқһқа, фатуаларға, діни үкімдерге "searchDatabase" құралын қолдан.
+• Егер сұрақ қарапайым сәлемдесу немесе алғыс болса, құралсыз қысқаша жауап бере бер.
+
+Жауапты тек табылған мәліметтерге сүйеніп қана, қазақ тілінде бер. 
 Жауап құрылымды, қысқа әрі нақты болуы тиіс. 
-Егер берілген контекстте сұраққа жауап болмаса, "Білмеймін" немесе "Бұл мәлімет кітаптарда табылмады" деп ашық айт, өз жаныңнан ештеңе қоспа.
+Егер берілген контекстте сұраққа жауап болмаса, "Білмеймін" немесе "Бұл мәлімет кітаптарда немесе Құранда табылмады" деп ашық айт, өз жаныңнан ештеңе қоспа.
 
 МАҢЫЗДЫ НҰСҚАУ (FORMATTING):
 Жауапты құрастырғанда ешқандай Markdown (жұлдызшалар *, **) қолданба. Тек таза HTML тегтерін қолдан. 
 Мысалы, тақырыптарды немесе маңызды сөздерді жуандату үшін <b>мәтін</b> қолдан, тізімдер үшін қарапайым нүкте • белгісін қолдан.
-ЕСКЕРТУ: Telegram қолдамайтын <br>, <p> сияқты тегтерді МҮЛДЕМ қолданба! Жаңа жолға түсу үшін тек табиғи жаңа жол таңбасын (enter) қолдан!`;
+Құран аяттарын форматтау ережесі:
+Егер сен пайдаланушыға Құран аятын (арабша мәтінін немесе қазақша аудармасын) Quran MCP құралынан немесе Qdrant базасынан алып көрсететін болсаң, оны міндетті түрде Telegram HTML форматындағы <blockquote>...</blockquote> (дәйексөз) тегінің ішіне алып жаз. Құран аяты сенің өз сөздеріңнен визуалды түрде осылайша бөлектеліп тұруы шарт.
+ЕСКЕРТУ: Telegram қолдамайтын <br>, <p> сияқты тегтерді МҮЛДЕМ қолданба! Жаңа жолға түсу үшін тек табиғи жаңа жол таңбасын (enter) қолдан!
+Дәйексөзді (кітап аты, беті, немесе сілтемені) жауаптың ішіне немесе соңына жазып қоюдың ҚАЖЕТІ ЖОҚ. Ол батырма арқылы автоматты түрде беріледі. Тек жауапты бер.`;
+
+/**
+ * Агенттің өз іс-әрекетін сипаттайтын қысқа, тірі тілдегі мәтінді генерациялау
+ */
+async function generateDynamicThought(
+  query: string,
+  actionType: 'analyzing' | 'history' | 'search' | 'quran' | 'synthesizing',
+  detail?: string
+): Promise<string> {
+  const prompts = {
+    analyzing: `Пайдаланушы мына сұрақты қойды: "${query}". Осыған қарап, қазір мен осы сұрақты талдап жатқанымды білдіретін өте қысқа, табиғи, ешқандай смайликсіз, 1-2 сөзден тұратын қазақша тіркес жаз (мысалы: "Сұрақты зерттеудемін", "Сұрақты қарастырудамын"). Тек сол тіркесті ғана қайтар.`,
+    history: `Пайдаланушымен алдыңғы сөйлесу тарихын оқып жатқанымызды білдіретін, өте қысқа, табиғи, 1-2 сөзден тұратын қазақша тіркес жаз (мысалы: "Жадыны қараудамын", "Контекстті тексерудемін"). Құрамында смайлик болмасын. Тек тіркесті ғана қайтар.`,
+    search: `Пайдаланушы сұрағы: "${query}". Осыған сәйкес дерекқордан іздеп жатқанымызды білдіретін (іздеу сұранысы: "${detail || query}"), өте қысқа, табиғи, 2-3 сөзден тұратын қазақша тіркес жаз (мысалы: "Дерекқордан іздеудемін", "Сәйкес мәліметтерді қараудамын"). Смайликтерсіз. Тек сол тіркесті ғана қайтар.`,
+    quran: `Пайдаланушы сұрағы: "${query}". Осыған сәйкес Құран аяттарын іздеп жатқанымызды білдіретін (сүре немесе тақырып: "${detail || query}"), өте қысқа, табиғи 2-3 сөзден тұратын қазақша тіркес жаз (мысалы: "Аяттарды қараудамын", "Құран жинағын іздеудемін"). Смайликтерсіз. Тек сол тіркесті ғана қайтар.`,
+    synthesizing: `Сұрақ: "${query}". Деректер табылды. Олардан жауап құрастырып жатқанымызды білдіретін өте қысқа, табиғи 2-3 сөзден тұратын қазақша тіркес жаз (мысалы: "Жауапты құрастырудамын", "Деректерді талдаудамын"). Смайликтерсіз. Тек сол тіркесті ғана қайтар.`
+  };
+
+  try {
+    const aiPromise = ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: prompts[actionType],
+      config: {
+        temperature: 0.7,
+        maxOutputTokens: 15
+      }
+    });
+
+    const timeoutPromise = new Promise<any>((_, reject) => 
+      setTimeout(() => reject(new Error("Timeout generation")), 1500)
+    );
+
+    const res = await Promise.race([aiPromise, timeoutPromise]);
+
+    let text = res.text?.trim().replace(/[".!?]/g, '') || '';
+    text = text.replace(/[\u2700-\u27BF]|[\uE000-\uF8FF]|\uD83C[\uDC00-\uDFFF]|\uD83D[\uDC00-\uDFFF]|[\u2011-\u26FF]|\uD83E[\uDD00-\uDFFF]/g, '');
+    if (text.length > 3 && text.length < 80) {
+      return text + '...';
+    }
+  } catch (e) {
+    // Fallback
+  }
+
+  const fallbacks = {
+    analyzing: 'Сұрақты талдаудамын',
+    history: 'Жадыны қараудамын',
+    search: 'Дерекқордан іздеудемін',
+    quran: 'Аяттарды қараудамын',
+    synthesizing: 'Жауапты құрастырудамын'
+  };
+  return fallbacks[actionType] + '...';
+}
 
 export interface AnswerResult {
   answer: string;
@@ -22,13 +83,14 @@ export interface AnswerResult {
 /**
  * Firestore-дан осы пайдаланушының соңғы 20 хабарламасын оқу
  */
-async function getChatHistory(chatId: string) {
+async function getChatHistory(chatId: string, threadId?: string | number) {
   if (!db) {
     console.warn("[⚠️] Firestore қосылмаған. Чат тарихы оқылмады.");
     return [];
   }
   try {
-    const snapshot = await db.collection('chats').doc(chatId).collection('messages')
+    const threadStr = (threadId !== undefined && threadId !== null) ? String(threadId) : 'general';
+    const snapshot = await db.collection('users').doc(chatId).collection('topics').doc(threadStr).collection('messages')
       .orderBy('timestamp', 'desc')
       .limit(20)
       .get();
@@ -36,13 +98,13 @@ async function getChatHistory(chatId: string) {
     if (snapshot.empty) return [];
 
     const messages = snapshot.docs.map(doc => doc.data());
-    const formattedHistory = messages.reverse().map(msg => ({
-      role: msg.role === 'bot' ? 'model' : 'user',
-      parts: [{ text: msg.text }]
-    }));
+    const formattedHistory = messages.reverse()
+      .filter(msg => msg && msg.text && msg.text.trim())
+      .map(msg => ({
+        role: msg.role === 'bot' ? 'model' : 'user',
+        parts: [{ text: msg.text }]
+      }));
 
-    // Gemini requires alternating history. To be safe, we will just filter or ensure.
-    // However, for safety without complex merging, let's just log it if we hit a problem later.
     return formattedHistory;
   } catch (error) {
     console.error("[❌] Чат тарихын оқу кезінде қате орын алды (Firestore Error):", error);
@@ -53,10 +115,11 @@ async function getChatHistory(chatId: string) {
 /**
  * Хабарламаларды Firestore-ға сақтау
  */
-async function saveToChatHistory(chatId: string, role: 'user' | 'bot', text: string) {
+async function saveToChatHistory(chatId: string, role: 'user' | 'bot', text: string, threadId?: string | number) {
   if (!db) return;
   try {
-    await db.collection('chats').doc(chatId).collection('messages').add({
+    const threadStr = (threadId !== undefined && threadId !== null) ? String(threadId) : 'general';
+    await db.collection('users').doc(chatId).collection('topics').doc(threadStr).collection('messages').add({
       role,
       text,
       timestamp: new Date()
@@ -67,161 +130,32 @@ async function saveToChatHistory(chatId: string, role: 'user' | 'bot', text: str
 }
 
 /**
- * 3. Басты функция: Ізделген контексттерді және тарихты қолданып жауап генерациялау
+ * 3. Басты функция: Агенттік RAG - Автоматты түрде іздеп, ағынды жауап береді
  */
-export async function generateAnswer(chatId: string, query: string, context: SearchResult[]): Promise<AnswerResult> {
-  console.log(`\n[🤖] Жауап генерациялау басталды (ChatID: ${chatId})`);
-  
-  try {
-    // Дәлелдердің (контексттің) мәтінін дайындау
-    const contextText = context.map((c, i) => 
-      `[Дерек ${i + 1}] Кітап: "${c.book}", Бет: ${c.page}\nМәтін: ${c.text}`
-    ).join('\n\n');
-    
-    // LLM-ге жіберілетін жүктеме: Контекст + Пайдаланушы сұрағы
-    let currentPrompt = `Контекст (кітап мәтіндері):\n${contextText}\n\nПайдаланушы сұрағы: ${query}`;
-
-    // 1. Тарихты алу
-    const rawHistory = await getChatHistory(chatId);
-    
-    // Gemini SDK STRICTLY ALTERNATING ROLES талабын қамтамасыз ету (user -> model -> user -> model...)
-    // Егер екі 'user' немесе екі 'model' қатарынан келсе, алдыңғысын алып тастаймыз немесе біріктіреміз.
-    const history: {role: string, parts: {text: string}[]}[] = [];
-    
-    for (const msg of rawHistory) {
-        if (history.length === 0) {
-            history.push(msg); // First message
-        } else {
-            const lastMsg = history[history.length - 1];
-            if (lastMsg.role === msg.role) {
-                // Бірдей рөлдер қатарынан келсе, мәтіндерін біріктіреміз
-                lastMsg.parts[0].text += `\n\n${msg.parts[0].text}`;
-            } else {
-                history.push(msg);
-            }
-        }
-    }
-    
-    // Барлық хабарламаларды форматтау (Тарих + Ағымдағы сұрақ)
-    // currentPrompt 'user' болғандықтан, ең соңғы тарих 'model' болуына көз жеткіземіз:
-    if (history.length > 0 && history[history.length - 1].role === 'user') {
-       // Егер тарихтың соңы 'user' болса, біз тағы 'user' қосамыз, сондықтан алдыңғы 'user'-ді біріктіреміз:
-       const lastUser = history.pop();
-       if (lastUser) {
-           currentPrompt = `[Алдыңғы хабарлама]: ${lastUser.parts[0].text}\n\n[Жаңа сұрақ]: ${currentPrompt}`;
-       }
-    }
-    
-    const contents = [
-      ...history,
-      { role: 'user', parts: [{ text: currentPrompt }] }
-    ];
-
-    console.log(`[⏳] LLM-ге сұраныс жіберілуде (gemini-3-flash-preview)...`);
-    let response;
-    try {
-      response = await ai.models.generateContent({
-        model: 'gemini-3-flash-preview',
-        contents: contents,
-        config: {
-          systemInstruction: SYSTEM_PROMPT,
-          temperature: 0.1, // Кесінді мәліметтерден ауытқымауы үшін төмен температура
-        }
-      });
-    } catch (genAiError: any) {
-      console.error("\n[❌] Gemini API Error:", genAiError?.response?.data || genAiError?.message || genAiError);
-      throw genAiError; // Try-catch сыртына шығарамыз
-    }
-
-    const answerText = response.text || "Кешіріңіз, жауап құрастыру мүмкін болмады.";
-    console.log(`[✅] Жауап сәтті генерацияланды.`);
-
-    // 4. Сұрақ пен жауапты дерекқорға сақтау
-    console.log(`[⏳] Чат тарихы Firestore-ға сақталуда...`);
-    // Мұнда тарихқа LLM-ге жіберілген толық prompt емес, тек пайдаланушының таза сұрағын ғана сақтаймыз
-    await saveToChatHistory(chatId, 'user', query); 
-    await saveToChatHistory(chatId, 'bot', answerText);
-
-    // 5. Нәтиже мен дәлелдерді бірге қайтару
-    return {
-      answer: answerText,
-      sources: context // Толықтай дәлел тізімі
-    };
-
-  } catch (error: any) {
-    console.error("\n[❌] Жауап генерациялау барысында қателік орын алды (RAG/System Error):", error?.message || error);
-    
-    const errorStr = [
-      String(error),
-      error?.message ? String(error.message) : "",
-      error?.status ? String(error.status) : "",
-      error?.statusText ? String(error.statusText) : "",
-      typeof error === 'object' ? JSON.stringify(error) : ""
-    ].join(" ").toLowerCase();
-
-    const isLeaked = errorStr.includes("leaked") || errorStr.includes("leak") || errorStr.includes("security");
-    const isCreditsError = errorStr.includes("depleted") || errorStr.includes("429") || errorStr.includes("resource_exhausted") || errorStr.includes("quota");
-    const isPermissionError = errorStr.includes("permission_denied") || errorStr.includes("403");
-    const isInvalidKey = errorStr.includes("invalid") || (errorStr.includes("not found") && errorStr.includes("key")) || (errorStr.includes("api key") && (errorStr.includes("wrong") || errorStr.includes("bad")));
-
-    if (isLeaked) {
-      return {
-        answer: "⚠️ <b>Жүйелік қате (API Key Leaked):</b>\n\nҚауіпсіздік мақсатында Google бұл API кілтін бұғаттаған (желіге сыртып кеткені анықталған). Өтінеміз, <a href=\"https://aistudio.google.com/\">Google AI Studio Settings</a> парақшасына өтіп, жаңа API кілтін алып, осы жоба баптауларында жаңартыңыз.",
-        sources: context
-      };
-    }
-
-    if (isCreditsError) {
-      return {
-        answer: "⚠️ <b>Жүйелік қате (429 Resource Exhausted / Quota):</b>\n\nGoogle Cloud Vertex AI жүйесіндегі сұраныс квотасы таусылды немесе шегіне жетті. Біраз уақыттан соң қайталап көріңіз немесе Google Cloud Console арқылы квотаңызды көбейтіңіз.",
-        sources: context
-      };
-    }
-
-    if (isPermissionError) {
-      return {
-        answer: "⚠️ <b>Жүйелік қате (403 Permission Denied):</b>\n\nAPI кілттің рұқсаты шектелген немесе бұғатталған. Баптаулардан <code>GEMINI_API_KEY</code> мәнін және оның белсенділігін тексеріңіз.",
-        sources: context
-      };
-    }
-
-    if (isInvalidKey) {
-      return {
-        answer: "⚠️ <b>Жүйелік қате (API Key Invalid):</b>\n\nБотқа орнатылған Gemini API кілті жарамсыз болып табылады. Өтінеміз, баптаулардағы <code>GEMINI_API_KEY</code> мәнін қайта тексеріп көріңіз.",
-        sources: context
-      };
-    }
-
-    return {
-      answer: "Кешіріңіз, жүйелік қателікке байланысты жауап бере алмаймын.",
-      sources: context
-    };
-  }
-}
-
-/**
- * Ағынды (Streaming) жауап генерациялау функциясы
- */
-export async function generateAnswerStream(
+export async function generateAgentAnswerStream(
   chatId: string,
   query: string,
-  context: SearchResult[],
-  onChunk: (currentFullText: string) => void
+  onChunk: (currentFullText: string) => void,
+  onAction: (statusText: string) => void,
+  threadId?: string | number
 ): Promise<AnswerResult> {
-  console.log(`\n[🤖] Ағынды (streaming) жауап беру басталды (ChatID: ${chatId})`);
+  console.log(`\n[🤖] Агенттік жауап беру басталды (ChatID: ${chatId})`);
   
   try {
-    const contextText = context.map((c, i) => 
-      `[Дерек ${i + 1}] Кітап: "${c.book}", Бет: ${c.page}\nМәтін: ${c.text}`
-    ).join('\n\n');
+    const analysisThought = await generateDynamicThought(query, 'analyzing');
+    onAction(analysisThought);
+
+    const rawHistory = await getChatHistory(chatId, threadId);
     
-    let currentPrompt = `Контекст (кітап мәтіндері):\n${contextText}\n\nПайдаланушы сұрағы: ${query}`;
-    const rawHistory = await getChatHistory(chatId);
-    
-    const history: {role: string, parts: {text: string}[]}[] = [];
+    const historyThought = await generateDynamicThought(query, 'history');
+    onAction(historyThought);
+
+    const history: {role: string, parts: any[]}[] = [];
     for (const msg of rawHistory) {
         if (history.length === 0) {
-            history.push(msg);
+            if (msg.role === 'user') {
+                history.push(msg);
+            }
         } else {
             const lastMsg = history[history.length - 1];
             if (lastMsg.role === msg.role) {
@@ -232,6 +166,7 @@ export async function generateAnswerStream(
         }
     }
     
+    let currentPrompt = query;
     if (history.length > 0 && history[history.length - 1].role === 'user') {
         const lastUser = history.pop();
         if (lastUser) {
@@ -239,44 +174,226 @@ export async function generateAnswerStream(
         }
     }
     
-    const contents = [
+    let contents: any[] = [
       ...history,
       { role: 'user', parts: [{ text: currentPrompt }] }
     ];
 
-    console.log(`[⏳] LLM-ге ағынды (stream) сұраныс жіберілуде...`);
-    const responseStream = await ai.models.generateContentStream({
-      model: 'gemini-3-flash-preview',
-      contents: contents,
-      config: {
-        systemInstruction: SYSTEM_PROMPT,
-        temperature: 0.1,
-      }
-    });
+    const searchDecl = {
+        name: "searchDatabase",
+        description: "Діни сұрақтар бойынша жауапты, фатуаларды, үкімдерді табу үшін кітаптардан (дерекқордан) іздеу жасайды. Ең маңызды құрал.",
+        parameters: {
+          type: Type.OBJECT,
+          properties: {
+            searchQuery: {
+              type: Type.STRING,
+              description: "Іздеуге арналған нақты сөйлем немесе кілт сөздер"
+            }
+          },
+          required: ["searchQuery"]
+        }
+    };
 
+    const quranDecl = {
+        name: "get_quran_verse",
+        description: "Құран аяттарын алу немесе Құраннан іздеу жасау. Пайдаланушы Құран туралы сұрағанда (мысалы 'аят', 'сүре', немесе белгілі бір Құран тақырыбы) осы құралды МІНДЕТТІ ТҮРДЕ қолдан.",
+        parameters: {
+          type: Type.OBJECT,
+          properties: {
+            verseKeyOrQuery: {
+              type: Type.STRING,
+              description: "Нақты аят сілтемесі (мысалы '2:183') немесе Құран мазмұны бойынша іздеуге арналған сұрақ/кілт сөз (мысалы 'ораза')."
+            }
+          },
+          required: ["verseKeyOrQuery"]
+        }
+    };
+
+    let usedSources: SearchResult[] = [];
     let answerText = "";
-    for await (const chunk of responseStream) {
-      if (chunk.text) {
-        answerText += chunk.text;
-        onChunk(answerText);
-      }
+    let isFinished = false;
+    let iterations = 0;
+    const MAX_ITERATIONS = 4;
+
+    while (!isFinished && iterations < MAX_ITERATIONS) {
+        iterations++;
+        console.log(`[⏳] LLM-ге сұраныс жіберілуде (Iteration ${iterations})...`);
+        const responseStream = await ai.models.generateContentStream({
+          model: 'gemini-3-flash-preview',
+          contents: contents,
+          config: {
+            systemInstruction: SYSTEM_PROMPT,
+            temperature: 0.1,
+            tools: [{ functionDeclarations: [searchDecl, quranDecl] }]
+          }
+        });
+
+        let isFunctionCall = false;
+        let functionCalls: any[] = [];
+
+        for await (const chunk of responseStream) {
+          if (chunk.functionCalls && chunk.functionCalls.length > 0) {
+            isFunctionCall = true;
+            functionCalls.push(...chunk.functionCalls);
+          }
+          if (chunk.text && !isFunctionCall) {
+            answerText += chunk.text;
+            onChunk(answerText);
+          }
+        }
+
+        if (!isFunctionCall) {
+          isFinished = true;
+          break; // Агент жауап беріп болды
+        }
+
+        // Агент құралды шақырды
+        const toolCall = functionCalls[0]; // тек біріншісін аламыз
+        if (toolCall) {
+            // push model's tool call into history
+            contents.push({
+                role: 'model',
+                parts: [{ functionCall: toolCall }]
+            });
+
+            if (toolCall.name === 'searchDatabase') {
+                const sq = toolCall.args.searchQuery || query;
+                const searchThought = await generateDynamicThought(query, 'search', sq);
+                onAction(searchThought);
+                console.log(`[🤖] Агент "searchDatabase" шақырды: "${sq}"`);
+                
+                // Дерекқордан іздеу
+                const searchResults = await searchAnswers(sq);
+                
+                let contextText = "Бұл тақырып бойынша ештеңе табылмады.";
+                if (searchResults && searchResults.length > 0) {
+                    usedSources.push(...searchResults); // дәлелдерді сақтаймыз
+                    contextText = searchResults.map((c, i) => 
+                      `[Дерек ${i + 1}] Кітап: "${c.book}", Бет: ${c.page}\nМәтін: ${c.text}`
+                    ).join('\n\n');
+                }
+
+                // Табылған мәліметті (немесе табылмағанын) қайтарамыз
+                contents.push({
+                    role: 'user',
+                    parts: [{
+                        functionResponse: {
+                            name: 'searchDatabase',
+                            response: { result: contextText }
+                        }
+                    }]
+                });
+                const synthesizingThought = await generateDynamicThought(query, 'synthesizing');
+                onAction(synthesizingThought);
+            } else if (toolCall.name === 'get_quran_verse') {
+                const vq = toolCall.args.verseKeyOrQuery || query;
+                const quranThought = await generateDynamicThought(query, 'quran', vq);
+                onAction(quranThought);
+                console.log(`[🤖] Агент "get_quran_verse" шақырды: "${vq}"`);
+                
+                // Resolve using quranService
+                const verseKeyPattern = /^(\d+):(\d+)(-\d+)?$/;
+                let quranResults: any[] = [];
+                const cleanInput = vq.trim();
+
+                if (verseKeyPattern.test(cleanInput)) {
+                  const match = cleanInput.match(verseKeyPattern);
+                  if (match) {
+                    const surahId = match[1];
+                    const startVerse = parseInt(match[2], 10);
+                    const endVerseStr = match[3];
+
+                    if (endVerseStr) {
+                      const endVerse = parseInt(endVerseStr.replace('-', ''), 10);
+                      const count = Math.min(endVerse - startVerse + 1, 3);
+                      for (let i = 0; i < count; i++) {
+                        const d = await fetchSingleVerse(`${surahId}:${startVerse + i}`);
+                        if (d) quranResults.push(d);
+                      }
+                    } else {
+                      const d = await fetchSingleVerse(cleanInput);
+                      if (d) quranResults.push(d);
+                    }
+                  }
+                } else {
+                  quranResults = await searchQuran(cleanInput);
+                }
+
+                let contextText = "Құраннан бұл сұранысқа сәйкес келетін аяттар табылмады.";
+                if (quranResults.length > 0) {
+                    contextText = quranResults.map(r => {
+                      return `[ҚҰРАН АЯТЫ] ${r.surahNameKk} сүресі, ${r.verseKey.split(':')[1]}-аят
+Сілтеме: ${r.quranComUrl}
+Арабша: ${r.arabicText}
+Қазақша аудармасы: ${r.translationText}`;
+                    }).join('\n\n');
+
+                    // Push to usedSources for button rendering
+                    for (const r of quranResults) {
+                        usedSources.push({
+                            book: `${r.surahNameKk} сүресі`,
+                            page: parseInt(r.verseKey.split(':')[1], 10) || 1,
+                            text: `${r.arabicText}\n${r.translationText}`,
+                            imageUrl: "",
+                            score: 1.0,
+                            isQuran: true,
+                            url: r.quranComUrl
+                        });
+                    }
+                }
+
+                // Табылған мәліметті қайтарамыз
+                contents.push({
+                    role: 'user',
+                    parts: [{
+                        functionResponse: {
+                            name: 'get_quran_verse',
+                            response: { result: contextText }
+                        }
+                    }]
+                });
+                const synthesizingThought = await generateDynamicThought(query, 'synthesizing');
+                onAction(synthesizingThought);
+            }
+        }
     }
 
     if (!answerText) {
       answerText = "Кешіріңіз, жауап құрастыру мүмкін болмады.";
     }
 
-    console.log(`[✅] Ағынды жауап толығымен аяқталды.`);
+    console.log(`[✅] Агенттік жауап толығымен аяқталды.`);
     
-    await saveToChatHistory(chatId, 'user', query); 
-    await saveToChatHistory(chatId, 'bot', answerText);
+    await saveToChatHistory(chatId, 'user', query, threadId); 
+    await saveToChatHistory(chatId, 'bot', answerText, threadId);
 
     return {
       answer: answerText,
-      sources: context
+      sources: usedSources
     };
   } catch (error: any) {
-    console.error("\n[❌] Ағынды жауап алу барысында қателік орын алды, кәдімгі режимге ауысамыз:", error?.message || error);
-    return generateAnswer(chatId, query, context);
+    console.error("\n[❌] Агенттік жауап алу барысында қателік орын алды:", error?.message || error);
+    return {
+       answer: "⚠️ Кешіріңіз, жүйелік қатеге байланысты жауап бере алмаймын.",
+       sources: []
+    };
   }
+}
+
+/**
+ * Compatibility wrapper function that returns agent answers non-streamed
+ */
+export async function generateAnswer(
+  chatId: string, 
+  query: string, 
+  preFetchedSources?: SearchResult[],
+  threadId?: string | number
+): Promise<AnswerResult> {
+  return generateAgentAnswerStream(
+    chatId,
+    query,
+    () => {},
+    () => {},
+    threadId
+  );
 }

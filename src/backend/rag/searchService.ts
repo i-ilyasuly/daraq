@@ -1,5 +1,5 @@
 import { qdrant } from '../db/qdrant';
-import { ai } from './aiClient';
+import { ai, embedText } from './aiClient';
 import 'dotenv/config';
 import { tokenizeAndHash } from './textUtils';
 
@@ -76,37 +76,45 @@ async function rerankResults(query: string, documents: SearchResult[]): Promise<
 /**
  * Пайдаланушының сұрағы бойынша Hybrid Search (BM25 + Dense) жүргізеді, содан соң RRF & Reranker.
  * @param query - Пайдаланушының сұрағы.
+ * @param preComputedDenseVector - Алдын ала есептелген Dense вектор (Gemini Embedding сұранысын үнемдеу үшін).
  * @returns Ең ұқсас 5 үзінді (chunk) және олардың метадатасы.
  */
-export async function searchAnswers(query: string): Promise<SearchResult[]> {
+export async function searchAnswers(query: string, preComputedDenseVector?: number[]): Promise<SearchResult[]> {
   try {
     console.log(`\n[🔎] Іздеу басталды. Сұрақ: "${query}"`);
 
-    // 1. Сұрақты векторға айналдыру (Dense Vector) - Gemini
-    console.log(`[⏳] Сұрақты Dense векторға (Embeddings) айналдыру...`);
-    const embeddingResponse = await ai.models.embedContent({
-      model: 'gemini-embedding-2',
-      contents: query,
-      config: {
-        taskType: 'RETRIEVAL_QUERY',
-        outputDimensionality: 1536
-      }
-    });
+    let denseVector = preComputedDenseVector;
 
-    let denseVector = embeddingResponse.embeddings?.[0]?.values;
     if (!denseVector) {
-      throw new Error("Сұрақтан вектор жасалмады.");
+      // 1. Сұрақты векторға айналдыру (Dense Vector) - Gemini (Асинхронды жіберу)
+      console.log(`[⏳] Сұрақты Dense және Sparse векторға қатар айналдыру...`);
+      const embeddingPromise = embedText({
+        model: 'gemini-embedding-2',
+        contents: query,
+        config: {
+          taskType: 'RETRIEVAL_QUERY',
+          outputDimensionality: 1536
+        }
+      });
+
+      // Вектордың келуін күту
+      const embeddingResponse = await embeddingPromise;
+
+      denseVector = embeddingResponse.embeddings?.[0]?.values;
+      if (!denseVector) {
+        throw new Error("Сұрақтан вектор жасалмады.");
+      }
+      
+      // Егер monkey-patch 768 өлшемді модельге түсіп кетсе, 1536 етіп нөлдермен толтырамыз
+      if (denseVector.length === 768) {
+        denseVector = [...denseVector, ...Array(768).fill(0)];
+      }
+    } else {
+      console.log(`[⚡] Алдын ала есептелген Dense вектор пайдаланылды! Gemini Embedding-ке сұраныс үнемделді.`);
     }
-    
-    // Егер monkey-patch 768 өлшемді модельге түсіп кетсе, 1536 етіп нөлдермен толтырамыз
-    if (denseVector.length === 768) {
-      denseVector = [...denseVector, ...Array(768).fill(0)];
-    }
-    
-    // 2. Сұрақты Sparse векторға (BM25) айналдыру
-    console.log(`[⏳] Сұрақты Sparse векторға (BM25) айналдыру...`);
+
+    // 2. Сұрақты Sparse векторға (BM25) айналдыру (Қатар орындау)
     const sparseVector = tokenizeAndHash(query);
-    console.log(`[✅] Векторлар сәтті құрылды.`);
 
     // Qdrant клиентін тексеру
     if (!qdrant) {
@@ -150,7 +158,8 @@ export async function searchAnswers(query: string): Promise<SearchResult[]> {
 
     // 5. Reranker арқылы үздік 5-ті іріктеу
     if (formattedResults.length > 0) {
-      return await rerankResults(query, formattedResults);
+      console.log(`[✅] Qdrant нәтижелерін тікелей қайтару (Top-5)...`);
+      return formattedResults.slice(0, 5);
     }
     
     return [];

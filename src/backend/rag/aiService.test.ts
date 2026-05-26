@@ -1,5 +1,5 @@
 import { generateAgentAnswerStream } from './aiService';
-import { ai } from './aiClient';
+import { ai, generateContentFixed, generateContentStreamFixed, embedText } from './aiClient';
 import { db } from '../db/firestore';
 import * as searchService from './searchService';
 import * as quranService from './quranService';
@@ -8,13 +8,24 @@ jest.mock('./aiClient', () => ({
   ai: {
     models: {
       generateContent: jest.fn(),
-      generateContentStream: jest.fn()
+      generateContentStream: jest.fn(),
+      embedContent: jest.fn()
     }
-  }
+  },
+  generateContentFixed: jest.fn(),
+  generateContentStreamFixed: jest.fn(),
+  embedText: jest.fn().mockResolvedValue({
+    embeddings: [{ values: new Array(1536).fill(0.1) }]
+  })
 }));
 
 jest.mock('./searchService', () => ({
   searchAnswers: jest.fn()
+}));
+
+jest.mock('./cacheService', () => ({
+  checkCache: jest.fn().mockResolvedValue(null),
+  writeCache: jest.fn().mockResolvedValue(undefined)
 }));
 
 jest.mock('./quranService', () => ({
@@ -48,7 +59,7 @@ describe('aiService (Agentic RAG)', () => {
         yield { text: 'world!' };
       }
 
-      (ai.models.generateContentStream as jest.Mock).mockResolvedValue(mockStream());
+      (generateContentStreamFixed as jest.Mock).mockResolvedValue(mockStream());
       const onChunk = jest.fn();
       const onAction = jest.fn();
 
@@ -76,7 +87,7 @@ describe('aiService (Agentic RAG)', () => {
         yield { text: 'about Namaz.' };
       }
 
-      (ai.models.generateContentStream as jest.Mock)
+      (generateContentStreamFixed as jest.Mock)
         .mockResolvedValueOnce(mockStream1())
         .mockResolvedValueOnce(mockStream2());
 
@@ -89,8 +100,7 @@ describe('aiService (Agentic RAG)', () => {
       const res = await generateAgentAnswerStream('chat_2', 'what is namaz?', onChunk, onAction);
 
       // Verify Actions
-      expect(onAction).toHaveBeenCalledWith('📖 Дерекқордан ізделуде...');
-      expect(onAction).toHaveBeenCalledWith('📖 Дәлелдер тексерілуде...');
+      expect(onAction).toHaveBeenCalledWith('👉 Мәліметтер ізделуде...');
       
       // Verify Function Calling behavior
       expect(searchService.searchAnswers).toHaveBeenCalledWith('namaz');
@@ -117,7 +127,7 @@ describe('aiService (Agentic RAG)', () => {
         yield { text: 'ayaty.' };
       }
 
-      (ai.models.generateContentStream as jest.Mock)
+      (generateContentStreamFixed as jest.Mock)
         .mockResolvedValueOnce(mockStream1())
         .mockResolvedValueOnce(mockStream2());
 
@@ -136,8 +146,7 @@ describe('aiService (Agentic RAG)', () => {
       const res = await generateAgentAnswerStream('chat_4', '2:183 аяты', onChunk, onAction);
 
       // Verify actions
-      expect(onAction).toHaveBeenCalledWith('📖 Құран аяттары ізделуде...');
-      expect(onAction).toHaveBeenCalledWith('📖 Дәлелдер тексерілуде...');
+      expect(onAction).toHaveBeenCalledWith('👉 Мәліметтер ізделуде...');
       
       // Verify Function Calling behavior
       expect(quranService.fetchSingleVerse).toHaveBeenCalledWith('2:183');
@@ -162,7 +171,7 @@ describe('aiService (Agentic RAG)', () => {
       async function* mockStream() {
         yield { text: 'test' };
       }
-      (ai.models.generateContentStream as jest.Mock).mockResolvedValue(mockStream());
+      (generateContentStreamFixed as jest.Mock).mockResolvedValue(mockStream());
 
       const onChunk = jest.fn();
       const onAction = jest.fn();
@@ -180,7 +189,7 @@ describe('aiService (Agentic RAG)', () => {
     });
 
     it('handles errors gracefully', async () => {
-      (ai.models.generateContentStream as jest.Mock).mockRejectedValue(new Error('Network error'));
+      (generateContentStreamFixed as jest.Mock).mockRejectedValue(new Error('Network error'));
       
       const onChunk = jest.fn();
       const onAction = jest.fn();

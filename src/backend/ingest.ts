@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { PDFParse } from 'pdf-parse';
 import { v4 as uuidv4 } from 'uuid';
-import { ai } from './rag/aiClient';
+import { ai, embedText } from './rag/aiClient';
 import 'dotenv/config';
 import { qdrant } from './db/qdrant';
 import { storage } from './storage';
@@ -148,7 +148,7 @@ export async function ingestBook(filePath: string, bookName: string) {
       let waitMs = 4000;
       while (retries > 0) {
         try {
-          embeddingResponse = await ai.models.embedContent({
+          embeddingResponse = await embedText({
             model: 'gemini-embedding-2',
             contents: chunkText,
             config: { taskType: 'RETRIEVAL_DOCUMENT', outputDimensionality: 1536 }

@@ -1,5 +1,5 @@
 import { qdrant } from './db/qdrant';
-import { ai } from './rag/aiClient';
+import { ai, embedText } from './rag/aiClient';
 import { v4 as uuidv4 } from 'uuid';
 import 'dotenv/config';
 
@@ -20,7 +20,7 @@ export async function initTestData() {
     if (!exists) {
       console.log(`Collection ${QDRANT_COLLECTION} not found. Creating...`);
       await qdrant.createCollection(QDRANT_COLLECTION, {
-        vectors: { size: 768, distance: 'Cosine' }
+        vectors: { size: 1536, distance: 'Cosine' }
       });
       console.log(`Qdrant collection created: ${QDRANT_COLLECTION}`);
       needsIngest = true;
@@ -47,17 +47,21 @@ export async function initTestData() {
       for (let i = 0; i < testTexts.length; i++) {
         const text = testTexts[i];
         
-        const embeddingResponse = await ai.models.embedContent({
-          model: 'text-embedding-005',
+        const embeddingResponse = await embedText({
+          model: 'gemini-embedding-2',
           contents: text,
           config: {
             taskType: 'RETRIEVAL_DOCUMENT',
-            outputDimensionality: 768
+            outputDimensionality: 1536
           }
         });
         
-        const vector = embeddingResponse.embeddings?.[0]?.values;
+        let vector = embeddingResponse.embeddings?.[0]?.values;
         if (!vector) continue;
+
+        if (vector.length === 768) {
+          vector = [...vector, ...Array(768).fill(0)];
+        }
 
         const chunkId = uuidv4();
         await qdrant.upsert(QDRANT_COLLECTION, {

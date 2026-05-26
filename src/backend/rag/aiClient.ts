@@ -74,7 +74,11 @@ const aiOptions: any = {
   }
 };
 
-if (hasServiceAccountFile) {
+// --- ҚАУІПСІЗДІК ҮШІН VERTEX AI ӨШІРІЛДІ ---
+// Болашақта іске қосу қажет болса, мына айнымалыны true деп өзгертіңіз:
+const USE_VERTEX_AI = false;
+
+if (USE_VERTEX_AI && hasServiceAccountFile) {
   process.env.GOOGLE_APPLICATION_CREDENTIALS = serviceAccountPath;
   aiOptions.vertexai = true;
   aiOptions.project = saProjectId;
@@ -88,64 +92,32 @@ if (hasServiceAccountFile) {
 export const ai = new GoogleGenAI(aiOptions);
 
 // --- Robust Monkey Patching for Vertex AI Availability ---
-const originalGenerateContent = ai.models.generateContent.bind(ai.models);
-ai.models.generateContent = async function(args: any) {
-  try {
-    return await originalGenerateContent(args);
-  } catch (err: any) {
-    const errorStr = String(err?.message || err).toLowerCase();
-    const isNotFoundOrPermission = errorStr.includes("not found") || errorStr.includes("404") || errorStr.includes("permission_denied") || errorStr.includes("403") || errorStr.includes("429") || errorStr.includes("quota") || errorStr.includes("resource_exhausted");
-    
-    if (isNotFoundOrPermission && args.model !== 'gemini-2.5-flash') {
-      console.warn(`\n[⚠️] Vertex AI: Сұралған "${args.model}" моделі табылмады немесе рұқсат/квота жоқ.`);
-      console.warn(`[🔄] Сенімді әрі 100% тұрақты "gemini-2.5-flash" моделіне автоматты түрде ауысу жүзеге асырылуда...`);
-      args.model = 'gemini-2.5-flash';
-      return await originalGenerateContent(args);
-    }
-    throw err;
-  }
-};
+// (Қазіргі уақытта AI Studio қолданылып жатқандықтан уақытша істен шығарылған)
+/*
+function wrapResult(res: any) { ... }
+ai.models.generateContent = async function(args: any) { ... }
+ai.models.generateContentStream = async function(args: any) { ... }
+ai.models.embedContent = async function(args: any) { ... }
+*/
 
-const originalGenerateContentStream = ai.models.generateContentStream.bind(ai.models);
-ai.models.generateContentStream = async function(args: any) {
-  try {
-    return await originalGenerateContentStream(args);
-  } catch (err: any) {
-    const errorStr = String(err?.message || err).toLowerCase();
-    const isNotFoundOrPermission = errorStr.includes("not found") || errorStr.includes("404") || errorStr.includes("permission_denied") || errorStr.includes("403") || errorStr.includes("429") || errorStr.includes("quota") || errorStr.includes("resource_exhausted");
-    
-    if (isNotFoundOrPermission && args.model !== 'gemini-2.5-flash') {
-      console.warn(`\n[⚠️] Vertex AI Stream: Сұралған "${args.model}" моделі табылмады немесе рұқсат/квота жоқ.`);
-      console.warn(`[🔄] Сенімді әрі 100% тұрақты "gemini-2.5-flash" моделіне автоматты түрде ауысу жүзеге асырылуда...`);
-      args.model = 'gemini-2.5-flash';
-      return await originalGenerateContentStream(args);
-    }
-    throw err;
-  }
-};
+/**
+ * Robust helper for embedding text
+ */
+export async function embedText(args: any) {
+  return await ai.models.embedContent(args);
+}
 
-const originalEmbedContent = ai.models.embedContent.bind(ai.models);
-ai.models.embedContent = async function(args: any) {
-  try {
-    // Vertex AI defaults to 'gemini-embedding-2-preview' for gemini-embedding-2
-    if (hasServiceAccountFile && args.model === 'gemini-embedding-2') {
-      args.model = 'gemini-embedding-2-preview';
-    }
-    return await originalEmbedContent(args);
-  } catch (err: any) {
-    const errorStr = String(err?.message || err).toLowerCase();
-    const isNotFoundOrPermission = errorStr.includes("not found") || errorStr.includes("404") || errorStr.includes("permission_denied") || errorStr.includes("403") || errorStr.includes("429") || errorStr.includes("quota") || errorStr.includes("resource_exhausted");
-    
-    if (isNotFoundOrPermission && args.model !== 'text-multilingual-embedding-002') {
-      console.warn(`\n[⚠️] Vertex AI: Сұралған "${args.model}" векторлау моделі табылмады немесе рұқсат/квота жоқ.`);
-      console.warn(`[🔄] Сенімді, заманауи әрі 100% тұрақты "text-multilingual-embedding-002" көптілді векторлау моделіне ауысу жүзеге асырылуда (Өлшемі: 768)...`);
-      args.model = 'text-multilingual-embedding-002';
-      if (args.config) {
-        args.config.outputDimensionality = 768; // text-multilingual-embedding-002 үшін 768 өлшемі
-      }
-      return await originalEmbedContent(args);
-    }
-    throw err;
-  }
-};
+/**
+ * Robust helper for general content generation
+ */
+export async function generateContentFixed(args: any) {
+  return await ai.models.generateContent(args);
+}
+
+/**
+ * Robust helper for streaming content generation
+ */
+export async function generateContentStreamFixed(args: any) {
+  return await ai.models.generateContentStream(args);
+}
 

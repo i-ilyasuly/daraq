@@ -20,11 +20,176 @@ interface SourceInfo {
 
 // ... original cache map
 const sourceCache = new Map<string, SourceInfo>();
+const groupCache = new Map<string, SourceInfo[]>();
+
+/**
+ * Firestore-бағытталған кэшті қолдау үшін көмекші функциялар (Stateless контейнерде жоғалмауы үшін)
+ */
+export async function getSourceInfo(id: string): Promise<SourceInfo | undefined> {
+  const mem = sourceCache.get(id);
+  if (mem) return mem;
+
+  if (db) {
+    try {
+      const doc = await db.collection('sourceCache').doc(id).get();
+      if (doc.exists) {
+        const data = doc.data() as SourceInfo;
+        sourceCache.set(id, data);
+        return data;
+      }
+    } catch (e) {
+      console.error('[⚠️] Error retrieving from Firestore sourceCache:', e);
+    }
+  }
+  return undefined;
+}
+
+export function setSourceInfo(id: string, info: SourceInfo): void {
+  sourceCache.set(id, info);
+  if (db) {
+    db.collection('sourceCache').doc(id).set(info).catch(e => {
+      console.error('[⚠️] Error saving to Firestore sourceCache:', e);
+    });
+  }
+}
+
+export async function getGroupInfo(id: string): Promise<SourceInfo[] | undefined> {
+  const mem = groupCache.get(id);
+  if (mem) return mem;
+
+  if (db) {
+    try {
+      const doc = await db.collection('groupCache').doc(id).get();
+      if (doc.exists) {
+        const data = (doc.data() as { sources: SourceInfo[] }).sources;
+        groupCache.set(id, data);
+        return data;
+      }
+    } catch (e) {
+      console.error('[⚠️] Error retrieving from Firestore groupCache:', e);
+    }
+  }
+  return undefined;
+}
+
+export function setGroupInfo(id: string, sources: SourceInfo[]): void {
+  groupCache.set(id, sources);
+  if (db) {
+    db.collection('groupCache').doc(id).set({ sources }).catch(e => {
+      console.error('[⚠️] Error saving to Firestore groupCache:', e);
+    });
+  }
+}
+
+interface PaginationState {
+  quranSources: any[];
+  bookSources: any[];
+  quranPageIndex: number;
+}
+
+const paginationCache = new Map<string, PaginationState>();
+const renamedTopicsCache = new Set<string>();
+
+export function processAndDeduplicateSources(rawSources: any[]): { quranSources: any[]; bookSources: any[] } {
+  if (!rawSources || rawSources.length === 0) {
+    return { quranSources: [], bookSources: [] };
+  }
+
+  const quranSources: any[] = [];
+  const bookSources: any[] = [];
+
+  const seenQuran = new Set<string>();
+  const seenBook = new Set<string>();
+
+  for (const src of rawSources) {
+    if (!src) continue;
+
+    const isQuran = src.isQuran || 
+                    (src.book && src.book.endsWith('сүресі')) || 
+                    (src.url && src.url.toLowerCase().includes('quran.com'));
+
+    if (isQuran) {
+      const key = src.url || `${src.book}_${src.page}`;
+      if (!seenQuran.has(key)) {
+        seenQuran.add(key);
+        quranSources.push({
+          book: src.book,
+          page: src.page || 1,
+          url: src.url || 'https://quran.com',
+          isQuran: true,
+          text: src.text || ""
+        });
+      }
+    } else {
+      const key = `${src.book}_${src.page}`;
+      if (!seenBook.has(key)) {
+        seenBook.add(key);
+        bookSources.push({
+          book: src.book,
+          page: src.page || 1,
+          imageUrl: src.imageUrl || "",
+          text: src.text || ""
+        });
+      }
+    }
+  }
+
+  return { quranSources, bookSources };
+}
+
+export function buildKeyboard(quranSources: any[], bookSources: any[], quranPageIndex: number, pagId: string): any {
+  const buttons: any[][] = [];
+
+  // 1. Дәлел суреттері (діни кітап беттері) – әрқашан міндетті түрде жоғарыда
+  if (bookSources && bookSources.length > 0) {
+    if (bookSources.length === 1) {
+      const src = bookSources[0];
+      if (src.imageUrl || src.book) {
+        const bookLabel = src.book.length > 20 ? src.book.substring(0, 18) + '...' : src.book;
+        const btnLabel = `🖼 Дәлел: ${bookLabel}, ${src.page}-бет`;
+        
+        // Find existing or create unique sourceId
+        let sourceId = '';
+        for (const [key, val] of sourceCache.entries()) {
+          if (val.book === src.book && val.page === src.page) {
+            sourceId = key;
+            break;
+          }
+        }
+        if (!sourceId) {
+          sourceId = uuidv4().substring(0, 8);
+          setSourceInfo(sourceId, {
+            book: src.book,
+            page: src.page,
+            imageUrl: src.imageUrl || ""
+          });
+        }
+        
+        buttons.push([Markup.button.callback(btnLabel, `view_source_${sourceId}`)]);
+      }
+    } else {
+      // Бірнеше дәлелді бір ғана батырма ретінде ұсынамыз
+      const groupId = uuidv4().substring(0, 8);
+      const sourcesList = bookSources.map(src => ({
+        book: src.book,
+        page: src.page || 1,
+        imageUrl: src.imageUrl || ""
+      }));
+      setGroupInfo(groupId, sourcesList);
+
+      const btnLabel = `🖼 Барлық дәлел суреттерін көру (${bookSources.length} сурет)`;
+      buttons.push([Markup.button.callback(btnLabel, `view_srcgrp_${groupId}`)]);
+    }
+  }
+
+  if (buttons.length === 0) return null;
+  return Markup.inlineKeyboard(buttons);
+}
 
 /**
  * Қазақша кириллицаны латыншаға транслитерациялау функциясы
  */
-function transliterateToLatin(text: string): string {
+export function transliterateToLatin(text: string): string {
   const map: { [key: string]: string } = {
     'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd', 'е': 'e', 'ё': 'yo', 'ж': 'zh', 'з': 'z',
     'и': 'i', 'й': 'y', 'к': 'k', 'л': 'l', 'м': 'm', 'н': 'n', 'о': 'o', 'п': 'p', 'р': 'r',
@@ -172,17 +337,88 @@ async function addWatermark(imageUrl: string, bookName: string, pageNumber: numb
   }
 }
 
+// Қазақша сүрелер картасы (Quran.com ID-леріне сәйкес)
+const KAZ_SURAHS: { [key: string]: number } = {
+  'бақара': 2, 'әли имран': 3, 'әли-имран': 3, 'ниса': 4, 'мәида': 5, 'анғам': 6, 'әнғам': 6, 'ағраф': 7, 'әнфал': 8, 'тәубе': 9, 'юнус': 10,
+  'һұд': 11, 'юсуф': 12, 'рағд': 13, 'ибраһим': 14, 'хижр': 15, 'нахл': 16, 'исра': 17, 'кәһф': 18, 'мәриям': 19, 'таһа': 20,
+  'әнбия': 21, 'хаж': 22, 'муминун': 23, 'нұр': 24, 'фурқан': 25, 'шуара': 26, 'нәмл': 27, 'қасас': 28, 'анкабут': 29, 'әнкабут': 29,
+  'рум': 30, 'лұқман': 31, 'сәжде': 32, 'ахзаб': 33, 'сәбә': 34, 'фатыр': 35, 'ясин': 36, 'саффат': 37, 'саад': 38, 'зумар': 39,
+  'ғафир': 40, 'фуссилат': 41, 'шура': 42, 'зухруф': 43, 'духан': 44, 'жәсия': 45, 'ахқаф': 46, 'мұхаммед': 47, 'фатх': 48,
+  'хужурат': 49, 'қаф': 50, 'зәрият': 51, 'тур': 52, 'нәжм': 53, 'қамар': 54, 'рахман': 55, 'уақиға': 56, 'хадид': 57, 'мужәдәлә': 58,
+  'хашр': 59, 'мумтахина': 60, 'саф': 61, 'жұма': 62, 'мунафиқун': 63, 'тағабун': 64, 'талақ': 65, 'тахрим': 66, 'мүлік': 67, 'мулк': 67,
+  'қалам': 68, 'хаққа': 69, 'мағариж': 70, 'нұх': 71, 'жын': 72, 'муззаммил': 73, 'муддәссир': 74, 'қиямет': 75, 'инсан': 76, 'мүрсәләт': 77, 'нәбә': 78,
+  'назиғат': 79, 'ғабит': 80, 'тәкуир': 81, 'инфитар': 82, 'мутаффифин': 83, 'иншиқақ': 84, 'буруж': 85, 'тариқ': 86, 'ала': 87,
+  'ғашия': 88, 'фәжр': 89, 'бәләд': 90, 'шәмс': 91, 'ләйл': 92, 'духа': 93, 'инширах': 94, 'шарх': 94, 'тин': 95,
+  'алақ': 96, 'қадр': 97, 'бәййінә': 98, 'зілзәлә': 99, 'адият': 100, 'қариға': 101, 'тәкәсүр': 102, 'аср': 103, 'һумаза': 104,
+  'фил': 105, 'құрайыш': 106, 'мағун': 107, 'кәусар': 108, 'кәфирун': 109, 'наср': 110, 'мәсәд': 111, 'ықылас': 112, 'фәләқ': 113, 'нас': 114
+};
+
 /**
  * Telegram қабылдамайтын <br> және <p> сияқты тегтерді кәдімгі жол ауыстыруға алмастыру,
  * және қажет болған жағдайда жұлдызшалы Markdown-ды HTML форматына келтіру.
  */
-export function formatTelegramMessage(text: string): string {
+export function formatTelegramMessage(text: string, quranSources: any[] = []): string {
   let formatted = text;
   formatted = formatted.replace(/<br\s*\/?>/gi, '\n');
   formatted = formatted.replace(/<\/p>/gi, '\n\n').replace(/<p>/gi, '');
+  
+  // Тізімдердегі * белгілерін • белгісіне ауыстыру (Жаңа жолдан басталған немесе бос орын алдындағы)
+  formatted = formatted.replace(/^(\s*)\*\s/gm, '$1• ');
+
   formatted = formatted.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>'); // **bold** -> <b>bold</b> (Fallback)
-  formatted = formatted.replace(/\*(.*?)\*/g, '<i>$1</i>'); // *italic* -> <i>italic</i> (Fallback)
-  return formatted;
+  formatted = formatted.replace(/(?<!<)\*(?!>)(.*?)\*(?![^<]*>)/g, '<i>$1</i>'); // *italic*
+
+  // Үлкен бос орындарды болдырмау үшін 3 немесе одан көп қатар келген бос жолдарды бір бос жолға азайтамыз (ең көп дегенде 2 жаңа жол)
+  formatted = formatted.replace(/(?:\r?\n\s*){3,}/g, '\n\n');
+
+  // 1. Құран аяттарының нақты сілтемелерін (quranSources берілген болса) мәтін ішінде көк сілтемемен алмастыру
+  if (quranSources && quranSources.length > 0) {
+    for (const src of quranSources) {
+      if (!src.book) continue;
+      const surahKk = src.book.replace(" сүресі", "").trim();
+      const verseNum = src.page || 1;
+      const url = src.url || 'https://quran.com';
+      
+      const escapedSurah = surahKk.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+      // Match: "Бақара сүресінің 184-аятында", "Бақара сүресі, 184-аят", "Бақара 184-аят", etc.
+      const pattern = new RegExp(`(${escapedSurah}\\s+(?:сүресі(?:нің|нде|дегі)?,?\\s+)?${verseNum}(?:\\s*-\\s*аят(?:ында|ы|қа|пен)?)?)`, 'gi');
+      
+      formatted = formatted.replace(pattern, (match, p1, offset, fullStr) => {
+        // HTML сілтемесінің ішінде өзін тағы ауыстыруды болдырмау үшін:
+        const before = fullStr.substring(0, offset);
+        const openCount = (before.match(/<a\s/g) || []).length;
+        const closeCount = (before.match(/<\/a>/g) || []).length;
+        if (openCount > closeCount) {
+          return match;
+        }
+        return `<a href="${url}">${match}</a>`;
+      });
+    }
+  }
+
+  // 2. Мәтін ішіндегі кез келген Құран аяттарына сілтемелерді автоматты түрде тауып, Quran.com сілтемесіне айналдыру
+  const surahKeys = Object.keys(KAZ_SURAHS).sort((a, b) => b.length - a.length);
+  const escapedSurahs = surahKeys.map(k => k.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')).join('|');
+  const autoPattern = new RegExp(`(${escapedSurahs})\\s+(?:сүресі(?:нің|нде|дегі)?,?\\s+)?(\\d+)(?:\\s*-\\s*аят(?:ында|ы|қа|пен|қарлық|тар|қа)?\\b)?`, 'gi');
+
+  formatted = formatted.replace(autoPattern, (match, surahName, verseStr, offset, fullStr) => {
+    // Егер бұл сөз тіркесі бұрыннан <a> сілтемесінің ішінде немесе оған таяу тұрса, өзгертпейміз:
+    const before = fullStr.substring(0, offset);
+    const openCount = (before.match(/<a\s/g) || []).length;
+    const closeCount = (before.match(/<\/a>/g) || []).length;
+    if (openCount > closeCount) {
+      return match;
+    }
+
+    const surahId = KAZ_SURAHS[surahName.toLowerCase().trim()];
+    if (surahId) {
+      const url = `https://quran.com/${surahId}/${verseStr}`;
+      return `<a href="${url}">${match}</a>`;
+    }
+    return match;
+  });
+
+  return formatted.trim();
 }
 
 /**
@@ -226,6 +462,17 @@ function chooseBestSource(answer: string, sources: any[]): any {
   }
 
   return bestSource;
+}
+
+
+export function isAskingForProof(query: string): boolean {
+  const clean = query.toLowerCase();
+  const keywords = [
+    'дәлел', 'далел', 'сурет', 'көрсет', 'көрсете', 'кітап', 'аят', 
+    'көрмей', 'көрмедім', 'көрінбейді', 'көрінбей', 'таппадым', 'қайда', 
+    'сілтеме', 'көз', 'дерек', 'кітаптан', 'фото', 'скриншот'
+  ];
+  return keywords.some(kw => clean.includes(kw));
 }
 
 
@@ -282,236 +529,141 @@ export function setupBot() {
     }
   });
 
-  // Адамның өзі сол топик атауын қолмен өзгерткен кезде оны тіркеп, сақтау
-  bot.on('forum_topic_edited', async (ctx) => {
-    try {
-      const chatId = String(ctx.chat.id);
-      const targetThreadId = ctx.message?.message_thread_id;
-      const senderId = ctx.message?.from?.id;
-      const botId = ctx.botInfo?.id;
-
-      // Егер топикті боттың өзі өзгертсе, оны елемейміз (бұл біздің автоматты өзгертуіміз)
-      if (senderId && botId && senderId === botId) {
-        console.log(`[Bot] Ignoring forum_topic_edited service message since it was edited by the bot itself.`);
-        return;
-      }
-
-      if (chatId && targetThreadId && db) {
-        const threadStr = String(targetThreadId);
-        await db.collection('users').doc(chatId).collection('topics').doc(threadStr).set({
-          customTitle: true,
-          updatedAt: new Date()
-        }, { merge: true });
-        console.log(`[Bot] User manually edited topic ${targetThreadId}. Marked customTitle: true.`);
-      }
-    } catch (e) {
-      console.error('[Bot] Error handling forum_topic_edited:', e);
-    }
-  });
-
-const renamedTopicsCache = new Set<string>();
-
-  // 2. Сұрақты өңдеу
-  bot.on('text', async (ctx) => {
+  bot.on('message', async (ctx: any) => {
     const chatId = String(ctx.chat.id);
-    const query = ctx.message.text;
-    const chatType = ctx.chat.type;
-    const targetThreadId = ctx.message.message_thread_id;
-    let statusMessageId: number | undefined;
+    const targetThreadId = ctx.message?.message_thread_id;
+    const query = ctx.message && ('text' in ctx.message) ? ctx.message.text : '';
+
+    if (!query) return;
+
+    let isFirstTopicMessage = false;
+    const cacheKey = `${chatId}_${targetThreadId || 'general'}`;
+    const draftId = ctx.message.message_id; // Using user message_id as draft identifier!
 
     try {
-      // Күту мәртебесі: Ойлануда хабарламасын ЕШҚАНДАЙ кідіріссіз/күтусіз бірден жібереміз (Барынша жылдамдық үшін)
-      let statusMsg = await ctx.telegram.sendMessage(chatId, '⏳ Ойлануда...', {
-        message_thread_id: targetThreadId
-      } as any);
-      statusMessageId = statusMsg.message_id;
-
-      // Typing анимациясын әр 4 секунд сайын жіберіп тұрамыз
+      // Typing status indicating bot is thinking
       let isAgentThinking = true;
-      const typingInterval = setInterval(() => {
-          if (isAgentThinking && statusMessageId) {
-             ctx.telegram.sendChatAction(chatId, 'typing', { message_thread_id: targetThreadId }).catch(() => {});
+      const sendTypingStatus = async () => {
+        try {
+          if (isAgentThinking) {
+            await ctx.telegram.sendChatAction(chatId, 'typing', targetThreadId ? { message_thread_id: targetThreadId } : undefined);
           }
-      }, 4000);
+        } catch (e) {}
+      };
+      
+      const typingInterval = setInterval(sendTypingStatus, 4000);
+      sendTypingStatus();
 
-      // Бірінші хабарлама екенін және топик атауын дайындауды фонда/параллель орындаймыз
-      let isFirstTopicMessage = false;
-      let topicNamePromise: Promise<string | undefined> | null = null;
+      try {
+        await ctx.telegram.callApi('sendMessageDraft', {
+          chat_id: chatId,
+          draft_id: draftId,
+          message_thread_id: targetThreadId,
+          text: '⏳ <i>Ойланып жатырмын...</i>',
+          parse_mode: 'HTML'
+        });
+      } catch (e) {
+        // Ignore API failures for draft
+      }
 
-      if (targetThreadId) {
-        const cacheKey = `${chatId}_${targetThreadId}`;
+      if (targetThreadId && db) {
         if (!renamedTopicsCache.has(cacheKey)) {
-          let hasPriorMessages = false;
+          const topicDoc = await db.collection('users').doc(chatId).collection('topics').doc(String(targetThreadId)).get();
+          if (topicDoc.exists && topicDoc.data()?.renamed) {
+            renamedTopicsCache.add(cacheKey);
+          } else {
+            const topicMessages = await db.collection('users').doc(chatId).collection('topics').doc(String(targetThreadId)).collection('messages').limit(1).get();
+            const hasPriorMessages = !topicMessages.empty;
+            if (hasPriorMessages) {
+              renamedTopicsCache.add(cacheKey);
+            } else {
+              isFirstTopicMessage = true;
+              renamedTopicsCache.add(cacheKey);
+            }
+          }
+        }
+      }
+
+      const threadStr = (targetThreadId !== undefined && targetThreadId !== null) ? String(targetThreadId) : 'general';
+
+      let quranSources: any[] = [];
+      let bookSources: any[] = [];
+      let inlineKeyboard: any = null;
+
+      const answerData = await generateAgentAnswerStream(
+        chatId,
+        query,
+        async (currentFullText) => {
+          const formatted = formatTelegramMessage(currentFullText);
           try {
-            if (db) {
-              const threadStr = String(targetThreadId);
-              const topicDoc = await db.collection('users').doc(chatId).collection('topics').doc(threadStr).get();
-              const messagesSnapshot = await db.collection('users').doc(chatId).collection('topics').doc(threadStr).collection('messages').limit(1).get();
-              
-              if (topicDoc.exists && (topicDoc.data()?.renamed || topicDoc.data()?.customTitle)) {
-                hasPriorMessages = true;
-              } else if (!messagesSnapshot.empty) {
-                hasPriorMessages = true;
+            await ctx.telegram.callApi('sendMessageDraft', {
+              chat_id: chatId,
+              draft_id: draftId,
+              message_thread_id: targetThreadId,
+              text: formatted,
+              parse_mode: 'HTML'
+            });
+          } catch(e) {}
+        },
+        async (statusText) => {
+          try {
+            await ctx.telegram.callApi('sendMessageDraft', {
+              chat_id: chatId,
+              draft_id: draftId,
+              message_thread_id: targetThreadId,
+              text: `⏳ ${statusText}`,
+              parse_mode: 'HTML'
+            });
+          } catch (e) {}
+        },
+        targetThreadId
+      );
+
+      isAgentThinking = false;
+      clearInterval(typingInterval);
+
+      // Егер осы сұраныста дәлелдер табылса, оларды Firestore-ға кэштейміз
+      if (answerData.sources && answerData.sources.length > 0) {
+        if (db) {
+          db.collection('users').doc(chatId).collection('topics').doc(threadStr).collection('latestSources').doc('current').set({
+            sources: answerData.sources,
+            updatedAt: new Date()
+          }).catch(e => console.error('[⚠️] Error caching latest sources:', e));
+        }
+      } else if (isAskingForProof(query)) {
+        // Егер дәлел табылмаса, бірақ пайдаланушы сұраса немесе көрмей тұрса, бұрын табылған соңғы дәлелдерді кэштен жүктейміз
+        if (db) {
+          try {
+            const cachedDoc = await db.collection('users').doc(chatId).collection('topics').doc(threadStr).collection('latestSources').doc('current').get();
+            if (cachedDoc.exists) {
+              const cachedData = cachedDoc.data();
+              if (cachedData && cachedData.sources && cachedData.sources.length > 0) {
+                answerData.sources = cachedData.sources;
+                console.log(`[Cache] Restored ${cachedData.sources.length} sources from Firestore for query: "${query}"`);
               }
             }
           } catch (e) {
-            console.error('[⚠️] Error checking topic metadata in Firestore:', e);
-          }
-
-          if (hasPriorMessages) {
-            renamedTopicsCache.add(cacheKey);
-          } else {
-            renamedTopicsCache.add(cacheKey);
-            isFirstTopicMessage = true;
-
-            // Жауап генерациясымен параллельді түрде тақырып атауын дайындаймыз
-            const prompt = `Сен Telegram тобындағы тақырыпқа (forum topic) өте қысқа, 2-3 сөзден тұратын атау және сәйкес эмодзи ойлап табуың керек. \n\nАлғашқы сұрақ: "${query}"\n\nТалаптар:\n1. 1 эмодзи + 2 немесе 3 сөз. Кез келген сәйкес келетін смайликті (эмодзи) еркін таңда, ешқандай шектеу жоқ.\n2. Атау қазақ тілінде болуы міндетті.\n3. Ешқандай қосымша мәтінсіз, тек атауды қайтар.\nМысал: 🌙 Ораза пайдалары`;
-            
-            const aiPromise = ai.models.generateContent({
-              model: 'gemini-3.1-flash-lite', // User requested this model
-              contents: prompt
-            });
-            
-            const timeoutPromise = new Promise<any>((_, reject) => 
-              setTimeout(() => reject(new Error("Timeout generation: Model is hanging")), 3000)
-            );
-
-            topicNamePromise = Promise.race([aiPromise, timeoutPromise]).then(res => {
-              let newName = res.text?.trim().replace(/\n/g, ' ');
-              if (newName) {
-                return newName.substring(0, 128);
-              }
-              return undefined;
-            }).catch(async (err) => {
-              console.warn('[AI] gemini-3.1-flash-lite қатесі немесе күту уақыты аяқталды (Timeout), gemini-2.5-flash моделіне ауысамыз:', err.message || err);
-              try {
-                const fallbackRes = await ai.models.generateContent({
-                  model: 'gemini-2.5-flash',
-                  contents: prompt
-                });
-                let fallbackName = fallbackRes.text?.trim().replace(/\n/g, ' ');
-                if (fallbackName) {
-                  return fallbackName.substring(0, 128);
-                }
-              } catch(fallbackErr) {
-                console.error('[AI] Fallback Топик атын генерациялау кезінде қателік:', fallbackErr);
-              }
-              return undefined;
-            });
+            console.error('[⚠️] Error fetching cached latest sources:', e);
           }
         }
       }
 
-      // 2. LLM арқылы ағынды (streaming) жауап генерациялау
-      let lastSentText = "";
-      let lastSentTime = 0;
-      let throttleTimeout: NodeJS.Timeout | null = null;
-      let isUpdating = false;
-      const draftId = Math.floor(Math.random() * 1000000000) + 1; // Уникалды draft_id қажет (нөлдік емес)
-
-      const triggerDraftUpdate = async (textToUpdate: string) => {
-        if (!textToUpdate.trim() || textToUpdate === lastSentText) return;
-        isUpdating = true;
-        const payload: any = {
-          chat_id: chatId,
-          text: textToUpdate + ' ✍️...',
-          parse_mode: 'HTML',
-          draft_id: draftId
-        };
-        if (targetThreadId) {
-          payload.message_thread_id = targetThreadId;
-        }
-        try {
-          await ctx.telegram.callApi('sendMessageDraft' as any, payload);
-          lastSentText = textToUpdate;
-          lastSentTime = Date.now();
-        } catch (e) {
-          // Қателерді елемейміз (мысалы, жабылмаған HTML тегтері)
-        } finally {
-          isUpdating = false;
-        }
-      };
-
-      const handleChunk = (currentFullText: string) => {
-        if (!currentFullText.trim() || currentFullText === lastSentText) return;
-
-        const now = Date.now();
-        const timeSinceLast = now - lastSentTime;
-
-        if (throttleTimeout) {
-          clearTimeout(throttleTimeout);
-          throttleTimeout = null;
-        }
-
-        if (timeSinceLast >= 1000 && !isUpdating) {
-          triggerDraftUpdate(currentFullText);
-        } else {
-          // Мәтін мүлде жоғалмауы үшін келесі секунд басында орындауды жүйелейміз
-          const delay = Math.max(0, 1000 - timeSinceLast);
-          throttleTimeout = setTimeout(() => {
-            if (!isUpdating) {
-              triggerDraftUpdate(currentFullText);
-            }
-          }, delay);
-        }
-      };
-
-      const answerData = await generateAgentAnswerStream(chatId, query, async (currentFullText) => {
-        isAgentThinking = false;
-
-        // Бірінші рет ағын басталғанда уақытша хабарламаны өшіреміз (асинхронды, кідіртпестен)
-        if (statusMessageId) {
-          const tempId = statusMessageId;
-          statusMessageId = undefined;
-          ctx.telegram.deleteMessage(chatId, tempId).catch(() => {});
-        }
-
-        handleChunk(currentFullText);
-      }, async (statusActionStr) => {
-          // Агент құрал шақырғанда статусты жаңарту
-          if (statusMessageId && isAgentThinking) {
-             try {
-                 await ctx.telegram.editMessageText(chatId, statusMessageId, undefined, statusActionStr);
-             } catch(e) {}
-          }
-      }, targetThreadId);
-
-      clearInterval(typingInterval);
-      if (throttleTimeout) {
-        clearTimeout(throttleTimeout);
-      }
-
-      // Егер соңғы ағын аяқталғанда жіберілмеген мәтін қалып қойса, оны жібереміз
-      if (answerData.answer && answerData.answer !== lastSentText) {
-        await triggerDraftUpdate(answerData.answer);
-      }
-
-      let finalMessage = formatTelegramMessage(answerData.answer);
-
-      // 3. Батырмаларды құрастыру (Егер дәлелдер табылса)
-      let inlineKeyboard: any = null;
       if (answerData.sources && answerData.sources.length > 0) {
-        // Ең сенімді әрі жауапқа ең сәйкес келетін дәлелді батырмаға ілеміз
-        const bestSource = chooseBestSource(answerData.answer, answerData.sources) || answerData.sources[0];
-
-        if (bestSource.isQuran && bestSource.url) {
-          inlineKeyboard = Markup.inlineKeyboard([
-            Markup.button.url('📖 Quran.com-нан оқу', bestSource.url)
-          ]);
-        } else if (bestSource.imageUrl) {
-          const sourceId = uuidv4().substring(0, 8); // Қысқа ID (Telegram Callback Data Limit 64 bytes)
-          
-          sourceCache.set(sourceId, {
-            book: bestSource.book,
-            page: bestSource.page,
-            imageUrl: bestSource.imageUrl
+        const processed = processAndDeduplicateSources(answerData.sources);
+        quranSources = processed.quranSources;
+        bookSources = processed.bookSources;
+        if (quranSources.length > 0 || bookSources.length > 0) {
+          const pagId = uuidv4().substring(0, 8);
+          paginationCache.set(pagId, {
+            quranSources,
+            bookSources,
+            quranPageIndex: 0
           });
-
-          inlineKeyboard = Markup.inlineKeyboard([
-            Markup.button.callback('🖼 Дәлел суретті көру', `view_source_${sourceId}`)
-          ]);
+          inlineKeyboard = buildKeyboard(quranSources, bookSources, 0, pagId);
         }
       }
+
+      let finalMessage = formatTelegramMessage(answerData.answer, quranSources);
 
       const quoteMatch = query.match(/[^.?!]+[.?!]/);
       let quoteText = quoteMatch ? quoteMatch[0].trim() : query.trim();
@@ -520,8 +672,12 @@ const renamedTopicsCache = new Set<string>();
       }
       const exactQuoteText = query.includes(quoteText) ? quoteText : query.substring(0, Math.min(200, query.length));
 
-      const extraOptions: any = { parse_mode: 'HTML' };
-      
+      const extraOptions: any = { 
+        parse_mode: 'HTML',
+        disable_web_page_preview: true,
+        link_preview_options: { is_disabled: true }
+      };
+
       // Нақты сөйлемнен дәйексөз келтіру (Quote in Reply Parameters)
       extraOptions.reply_parameters = {
         message_id: ctx.message.message_id,
@@ -536,15 +692,6 @@ const renamedTopicsCache = new Set<string>();
         Object.assign(extraOptions, inlineKeyboard);
       }
 
-      // Біз әрқашан уақытша күту немесе ескі хабарламаны өшіреміз
-      if (statusMessageId) {
-        try {
-          await ctx.telegram.deleteMessage(chatId, statusMessageId);
-        } catch (e) {
-          // Елемейміз
-        }
-      }
-
       // Финалдық хабарламаны жібереміз
       try {
         await ctx.telegram.sendMessage(chatId, finalMessage, extraOptions);
@@ -553,32 +700,64 @@ const renamedTopicsCache = new Set<string>();
         const plainText = finalMessage.replace(/<[^>]*>?/gm, '');
         const plainOptions: any = { ...extraOptions };
         delete plainOptions.parse_mode;
-        // Re-assign inline keyboard explicitly in case it was lost
         if (inlineKeyboard) Object.assign(plainOptions, inlineKeyboard);
         await ctx.telegram.sendMessage(chatId, plainText, plainOptions);
       }
 
-      // Стриминг толық аяқталған соң ғана тақырып атын өзгерту (алдын ала дайындалған уәдені (promise) күту):
-      if (isFirstTopicMessage && targetThreadId && topicNamePromise) {
-        try {
-          const newName = await topicNamePromise;
-          if (newName) {
-            await ctx.telegram.editForumTopic(chatId, targetThreadId, { name: newName });
-            console.log(`[AI] Жеке чаттағы Топик аты өзгертілді: ${newName}`);
+      // Стриминг толық аяқталған соң ғана тақырып атын өзгерту
+      if (isFirstTopicMessage && targetThreadId) {
+        (async () => {
+          try {
+            const prompt = `Мына Сұрақ пен Жауапты талдап, олардың негізгі тақырыбын 2-3 сөзден тұратын қысқа, нұсқа әрі тартымды атауға айналдыр. Басына міндетті түрде тақырыпқа сай 1 эмодзи қос. Тек қазақ тілінде жаз.\n\nСұрақ: "${query}"\nЖауап: "${finalMessage}"`;
             
-            // Сақталған статус ретінде Firestore-ға жазу
-            if (db) {
-              const threadStr = String(targetThreadId);
-              await db.collection('users').doc(chatId).collection('topics').doc(threadStr).set({
-                renamed: true,
-                title: newName,
-                updatedAt: new Date()
-              }, { merge: true });
+            const aiPromise = ai.models.generateContent({
+              model: 'gemini-3.1-flash-lite',
+              contents: prompt
+            });
+            
+            const timeoutPromise = new Promise<any>((_, reject) => 
+               setTimeout(() => reject(new Error("Timeout generation: Model is hanging")), 3000)
+            );
+
+            let newName = await Promise.race([aiPromise, timeoutPromise]).then(res => {
+              let parsedName = res.text?.trim().replace(/\n/g, ' ');
+              return parsedName ? parsedName.substring(0, 128) : undefined;
+            }).catch(async (err) => {
+              console.warn('[AI] gemini-3.1-flash-lite қатесі немесе күту уақыты аяқталды (Timeout), балама модельге ауысамыз:', err.message || err);
+              try {
+                const fallbackRes = await ai.models.generateContent({
+                  model: 'gemini-3.1-flash-lite',
+                  contents: prompt
+                });
+                let fallbackName = fallbackRes.text?.trim().replace(/\n/g, ' ');
+                return fallbackName ? fallbackName.substring(0, 128) : undefined;
+              } catch(fallbackErr) {
+                console.error('[AI] Fallback Топик атын генерациялау кезінде қателік:', fallbackErr);
+                return undefined;
+              }
+            });
+
+            if (newName) {
+              newName = newName.replace(/[\*_`~#|\[\]()\\-]/g, '').replace(/\s+/g, ' ').trim();
             }
+
+            if (newName) {
+              await ctx.telegram.editForumTopic(chatId, targetThreadId, { name: newName });
+              console.log(`[AI] Жеке чаттағы Топик аты өзгертілді: ${newName}`);
+              
+              if (db) {
+                const threadStr = String(targetThreadId);
+                await db.collection('users').doc(chatId).collection('topics').doc(threadStr).set({
+                  renamed: true,
+                  title: newName,
+                  updatedAt: new Date()
+                }, { merge: true });
+              }
+            }
+          } catch(e) {
+            console.error('[AI] Топик атын өзгерту кезінде қателік:', e);
           }
-        } catch(e) {
-          console.error('[AI] Топик атын өзгерту кезінде қателік:', e);
-        }
+        })();
       }
 
     } catch (error: any) {
@@ -594,23 +773,53 @@ const renamedTopicsCache = new Set<string>();
         errorMessage = '⚠️ <b>Жүйелік қате (429 Resource Exhausted / Quota):</b>\n\nGoogle Cloud Vertex AI жүйесіндегі сұраныс квотасы таусылды немесе шегіне жетті. Біраз уақыттан соң қайталап көріңіз немесе Google Cloud Console арқылы квотаңызды көбейтіңіз.';
       }
 
-      if (statusMessageId) {
-        try {
-          await ctx.telegram.editMessageText(chatId, statusMessageId, undefined, errorMessage, { parse_mode: 'HTML' });
-        } catch (e) {
-          await ctx.telegram.sendMessage(chatId, errorMessage, { parse_mode: 'HTML', message_thread_id: targetThreadId } as any);
-        }
-      } else {
+      const theDraftId = ctx.message ? ctx.message.message_id : Date.now();
+      try {
         await ctx.telegram.sendMessage(chatId, errorMessage, { parse_mode: 'HTML', message_thread_id: targetThreadId } as any);
+      } catch (e) {
+        console.error("Error sending failure message:", e);
       }
     }
   });
 
-  // 4. "🖼 Дәлел суретті көру" батырмасын ұстап алу
+  // 4. "noop" батырмасын ұстап алу (бос батырма, ештеңе істемейді, тек күтуді өшіреді)
+  bot.action('noop', async (ctx) => {
+    try {
+      await ctx.answerCbQuery();
+    } catch (e) {}
+  });
+
+  // 5. Құран пагинациясын басқару
+  bot.action(/pag_quran_(.+)_(.+)/, async (ctx) => {
+    try {
+      const pagId = ctx.match[1];
+      const newPageIdx = parseInt(ctx.match[2], 10);
+
+      const state = paginationCache.get(pagId);
+      if (!state) {
+        await ctx.answerCbQuery('Кешіріңіз, бұл батырманың мерзімі өтіп кеткен.', { show_alert: true });
+        return;
+      }
+
+      state.quranPageIndex = newPageIdx;
+      paginationCache.set(pagId, state);
+
+      const inlineKeyboard = buildKeyboard(state.quranSources, state.bookSources, newPageIdx, pagId);
+
+      await ctx.answerCbQuery();
+      if (inlineKeyboard) {
+        await ctx.editMessageReplyMarkup(inlineKeyboard.reply_markup);
+      }
+    } catch (error) {
+      console.error("[❌] Құран пагинациясы кезінде қате орын алды:", error);
+    }
+  });
+
+  // 6. "🖼 Дәлел суретті көру" батырмасын ұстап алу
   bot.action(/view_source_(.+)/, async (ctx) => {
     try {
       const sourceId = ctx.match[1];
-      const sourceInfo = sourceCache.get(sourceId);
+      const sourceInfo = await getSourceInfo(sourceId);
 
       if (!sourceInfo) {
         await ctx.answerCbQuery('Кешіріңіз, дәлел суреті табылмады немесе ескірген.', { show_alert: true });
@@ -628,6 +837,62 @@ const renamedTopicsCache = new Set<string>();
     } catch (error) {
       console.error("[❌] Суретті жүктеу кезінде қате:", error);
       await ctx.answerCbQuery('Суретті ашу кезінде қателік кетті.', { show_alert: true });
+    }
+  });
+
+  // 7. Бірнеше дәлел суретін бірге (Media Group) жіберетін батырманы ұстап алу
+  bot.action(/view_srcgrp_(.+)/, async (ctx) => {
+    try {
+      const groupId = ctx.match[1];
+      const sources = await getGroupInfo(groupId);
+
+      if (!sources || sources.length === 0) {
+        await ctx.answerCbQuery('Кешіріңіз, дәлел суреттері табылмады немесе ескірген.', { show_alert: true });
+        return;
+      }
+
+      await ctx.answerCbQuery('Дәлел суреттері дайындалуда...');
+
+      const imageBuffers: { buffer: Buffer; book: string; page: number }[] = [];
+
+      // Суреттерге су белгісін қосу
+      for (const src of sources) {
+        try {
+          const imageBuffer = await addWatermark(src.imageUrl, src.book, src.page);
+          imageBuffers.push({
+            buffer: imageBuffer,
+            book: src.book,
+            page: src.page
+          });
+        } catch (err) {
+          console.error(`[❌] Суретке су белгісін қосу кезіндегі қате (${src.book}):`, err);
+        }
+      }
+
+      if (imageBuffers.length === 0) {
+        await ctx.answerCbQuery('Кешіріңіз, ешқандай суретті жүктеу мүмкін болмады.', { show_alert: true });
+        return;
+      }
+
+      // Media Group түрінде біріктіріп жібереміз
+      try {
+        const media = imageBuffers.map(img => ({
+          type: 'photo' as const,
+          media: { source: img.buffer },
+          caption: `📖 ${img.book}, ${img.page}-бет`
+        }));
+        await ctx.replyWithMediaGroup(media);
+      } catch (mediaGroupError) {
+        console.warn("[⚠️] Media Group жіберу қатесі, суреттерді жеке-жеке жібереміз:", mediaGroupError);
+        // Fallback: send sequentially if Media Group fails
+        for (const img of imageBuffers) {
+          await ctx.replyWithPhoto({ source: img.buffer }, { caption: `📖 ${img.book}, ${img.page}-бет` });
+        }
+      }
+
+    } catch (error) {
+      console.error("[❌] Дәлелдер тобын жүктеу кезінде қате:", error);
+      await ctx.answerCbQuery('Суреттер топтамасын ашу кезінде қателік кетті.', { show_alert: true });
     }
   });
 

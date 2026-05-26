@@ -1,0 +1,26 @@
+Firebase Firestore initialized.
+Qdrant Client initialized.
+[🔑] Crypto-patch: Applied OpenSSL private key decoder override & Sign prototype interceptor.
+[🚀] Vertex AI (Service Account) дайындалды. Жоба: momyn-t1
+The user provided project/location will take precedence over the API key from the environment variables.
+
+[🤖] Агенттік жауап беру басталды (ChatID: test_chat_id_fresh_1779792597974)
+[⏳] LLM-ге сұраныс жіберілуде (Iteration 1)...
+[ACTION] 📖 Дерекқордан ізделуде...
+[🤖] Агент "searchDatabase" шақырды: "Белгісіз адам еңбегі"
+
+[🔎] Іздеу басталды. Сұрақ: "Белгісіз адам еңбегі"
+[⏳] Сұрақты Dense векторға (Embeddings) айналдыру...
+[⏳] Сұрақты Sparse векторға (BM25) айналдыру...
+[✅] Векторлар сәтті құрылды.
+[⏳] Qdrant дерекқорынан Hybrid Search (RRF) арқылы ең ұқсас 30 үзіндіні іздеу...
+[✅] 11 ұқсас үзінді табылды.
+[⏳] Cohere Reranker арқылы (Multilingual V3) нәтижелерді қайта іріктеу (Rerank)...
+[✅] Rerank аяқталды. Үздік 5 документ іріктелді.
+[ACTION] 📖 Дәлелдер тексерілуде...
+[⏳] LLM-ге сұраныс жіберілуде (Iteration 2)...
+[✅] Агенттік жауап толығымен аяқталды.
+
+
+FINAL ANSWER:
+ Кешіріңіз, жауап құрастыру мүмкін болмады.

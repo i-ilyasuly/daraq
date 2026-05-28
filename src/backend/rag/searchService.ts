@@ -1,5 +1,5 @@
 import { qdrant } from '../db/qdrant';
-import { ai, embedText } from './aiClient';
+import { ai, embedText, GEMINI_EMBEDDING_MODEL } from './aiClient';
 import 'dotenv/config';
 import { tokenizeAndHash } from './textUtils';
 
@@ -10,6 +10,7 @@ export interface SearchResult {
   text: string;
   book: string;
   page: number;
+  pages?: number[];
   imageUrl: string;
   score: number;
   isQuran?: boolean;
@@ -89,7 +90,7 @@ export async function searchAnswers(query: string, preComputedDenseVector?: numb
       // 1. Сұрақты векторға айналдыру (Dense Vector) - Gemini (Асинхронды жіберу)
       console.log(`[⏳] Сұрақты Dense және Sparse векторға қатар айналдыру...`);
       const embeddingPromise = embedText({
-        model: 'gemini-embedding-2',
+        model: GEMINI_EMBEDDING_MODEL,
         contents: query,
         config: {
           taskType: 'RETRIEVAL_QUERY',
@@ -147,10 +148,16 @@ export async function searchAnswers(query: string, preComputedDenseVector?: numb
     // 4. Нәтижелерді массив ретінде шығару
     const formattedResults: SearchResult[] = searchResults.map(hit => {
       const payload = hit.payload || {};
+      const pageNum = Number(payload.page || 0);
+      const pagesArray = Array.isArray(payload.pages) 
+        ? payload.pages.map(Number) 
+        : [pageNum];
+      
       return {
         text: String(payload.text || ''),
         book: String(payload.book || 'Белгісіз кітап'),
-        page: Number(payload.page || 0),
+        page: pageNum,
+        pages: pagesArray,
         imageUrl: String(payload.imageUrl || ''),
         score: hit.score || 0
       };

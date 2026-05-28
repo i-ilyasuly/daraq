@@ -7,6 +7,7 @@ import { searchAnswers } from '../rag/searchService';
 import { generateAgentAnswerStream } from '../rag/aiService';
 import { ai } from '../rag/aiClient';
 import { db } from '../db/firestore';
+import { getCoordinatesFromGCS, highlightImage } from '../rag/visionHighlight';
 
 const storage = customStorage || new Storage();
 // Fallback for dev: if you don't set it, it'll try this name
@@ -15,7 +16,9 @@ const PROCESSED_BUCKET = process.env.PROCESSED_IMAGES_BUCKET || 'daraq-497018-da
 interface SourceInfo {
   book: string;
   page: number;
+  pages?: number[];
   imageUrl: string;
+  targetText?: string;
 }
 
 // ... original cache map
@@ -121,12 +124,14 @@ export function processAndDeduplicateSources(rawSources: any[]): { quranSources:
         });
       }
     } else {
-      const key = `${src.book}_${src.page}`;
+      const chunkPages = src.pages && Array.isArray(src.pages) ? src.pages.map(Number) : [src.page || 1];
+      const key = `${src.book}_${chunkPages.join('_')}`;
       if (!seenBook.has(key)) {
         seenBook.add(key);
         bookSources.push({
           book: src.book,
-          page: src.page || 1,
+          page: chunkPages[0] || 1,
+          pages: chunkPages,
           imageUrl: src.imageUrl || "",
           text: src.text || ""
         });
@@ -144,14 +149,76 @@ export function buildKeyboard(quranSources: any[], bookSources: any[], quranPage
   if (bookSources && bookSources.length > 0) {
     if (bookSources.length === 1) {
       const src = bookSources[0];
+      const pages = src.pages && Array.isArray(src.pages) ? src.pages : [src.page || 1];
+      
       if (src.imageUrl || src.book) {
-        const bookLabel = src.book.length > 20 ? src.book.substring(0, 18) + '...' : src.book;
-        const btnLabel = `🖼 Дәлел: ${bookLabel}, ${src.page}-бет`;
+        if (pages.length <= 1) {
+          const btnLabel = `🖼 Дәлел суретті көру (${src.page}-бет)`;
+          
+          // Find existing or create unique sourceId
+          let sourceId = '';
+          for (const [key, val] of sourceCache.entries()) {
+            if (val.book === src.book && val.page === src.page) {
+              sourceId = key;
+              break;
+            }
+          }
+          if (!sourceId) {
+            sourceId = uuidv4().substring(0, 8);
+            setSourceInfo(sourceId, {
+              book: src.book,
+              page: src.page,
+              pages: pages,
+              imageUrl: src.imageUrl || "",
+              targetText: src.text || ""
+            });
+          }
+          
+          buttons.push([Markup.button.callback(btnLabel, `view_source_${sourceId}`)]);
+        } else {
+          // If 2 or more pages, it becomes a group button!
+          const groupId = uuidv4().substring(0, 8);
+          // Wait! Let's build GCS and image naming helper for GCS paths dynamically
+          const sourcesList = pages.map((p: number) => ({
+            book: src.book,
+            page: p,
+            imageUrl: src.imageUrl || "",
+            targetText: src.text || ""
+          }));
+          setGroupInfo(groupId, sourcesList);
+
+          const btnLabel = `🖼 Барлық дәлел суреттерін көру (${pages.length} сурет)`;
+          buttons.push([Markup.button.callback(btnLabel, `view_srcgrp_${groupId}`)]);
+        }
+      }
+    } else {
+      // Multiple chunks! Let's collect all unique book/page combinations across all chunks
+      const allPages: { book: string; page: number; imageUrl: string; targetText?: string }[] = [];
+      const seen = new Set<string>();
+      
+      for (const src of bookSources) {
+        const pages = src.pages && Array.isArray(src.pages) ? src.pages : [src.page || 1];
+        for (const p of pages) {
+          const key = `${src.book}_${p}`;
+          if (!seen.has(key)) {
+            seen.add(key);
+            allPages.push({
+              book: src.book,
+              page: p,
+              imageUrl: src.imageUrl || "",
+              targetText: src.text || ""
+            });
+          }
+        }
+      }
+
+      if (allPages.length === 1) {
+        const item = allPages[0];
+        const btnLabel = `🖼 Дәлел суретті көру (${item.page}-бет)`;
         
-        // Find existing or create unique sourceId
         let sourceId = '';
         for (const [key, val] of sourceCache.entries()) {
-          if (val.book === src.book && val.page === src.page) {
+          if (val.book === item.book && val.page === item.page) {
             sourceId = key;
             break;
           }
@@ -159,26 +226,21 @@ export function buildKeyboard(quranSources: any[], bookSources: any[], quranPage
         if (!sourceId) {
           sourceId = uuidv4().substring(0, 8);
           setSourceInfo(sourceId, {
-            book: src.book,
-            page: src.page,
-            imageUrl: src.imageUrl || ""
+            book: item.book,
+            page: item.page,
+            pages: [item.page],
+            imageUrl: item.imageUrl || "",
+            targetText: item.targetText || ""
           });
         }
-        
         buttons.push([Markup.button.callback(btnLabel, `view_source_${sourceId}`)]);
-      }
-    } else {
-      // Бірнеше дәлелді бір ғана батырма ретінде ұсынамыз
-      const groupId = uuidv4().substring(0, 8);
-      const sourcesList = bookSources.map(src => ({
-        book: src.book,
-        page: src.page || 1,
-        imageUrl: src.imageUrl || ""
-      }));
-      setGroupInfo(groupId, sourcesList);
+      } else {
+        const groupId = uuidv4().substring(0, 8);
+        setGroupInfo(groupId, allPages);
 
-      const btnLabel = `🖼 Барлық дәлел суреттерін көру (${bookSources.length} сурет)`;
-      buttons.push([Markup.button.callback(btnLabel, `view_srcgrp_${groupId}`)]);
+        const btnLabel = `🖼 Барлық дәлел суреттерін көру (${allPages.length} сурет)`;
+        buttons.push([Markup.button.callback(btnLabel, `view_srcgrp_${groupId}`)]);
+      }
     }
   }
 
@@ -208,7 +270,7 @@ export function transliterateToLatin(text: string): string {
 /**
  * Сурет үстіне су белгісін (Watermark) салатын функция
  */
-async function addWatermark(imageUrl: string, bookName: string, pageNumber: number): Promise<Buffer> {
+async function addWatermark(imageUrl: string, bookName: string, pageNumber: number, targetText?: string): Promise<Buffer> {
   const watermarkText = `Daraq: ${bookName}, ${pageNumber} бет`;
   const svgText = `
     <svg width="800" height="80">
@@ -323,6 +385,17 @@ async function addWatermark(imageUrl: string, bookName: string, pageNumber: numb
 
   // Егер жарамды сурет болса, оның төменгі жағына су белгісін саламыз
   if (!useFallbackWatermark) {
+    if (targetText) {
+      try {
+        const words = await getCoordinatesFromGCS(bookName, pageNumber);
+        if (words && words.length > 0) {
+           baseImageBuffer = await highlightImage(baseImageBuffer, words, targetText);
+        }
+      } catch (e) {
+        console.warn("[⚠️] Highlighting failed, skipping:", e);
+      }
+    }
+
     return await sharp(baseImageBuffer)
       .composite([
         {
@@ -462,6 +535,78 @@ function chooseBestSource(answer: string, sources: any[]): any {
   }
 
   return bestSource;
+}
+
+/**
+ * Жауап мәтінінен модель тікелей сілтеме жасаған кітаптар мен беттерді іздейді.
+ * Тек сол нақты беттерді ғана сүзгілеп алып қалады.
+ * Егер сәйкестік табылмаса, ең жақсы сәйкестікті (chooseBestSource) балама ретінде қайтарады.
+ */
+export function filterSourcesByResponse(sources: any[], answer: string): any[] {
+  if (!sources || sources.length === 0) return [];
+
+  const filtered: any[] = [];
+  const lowercaseAnswer = answer.toLowerCase();
+  
+  // 1. Құран дереккөздері үшін сүзгілеу:
+  const quranSources = sources.filter(src => src.isQuran || (src.book && src.book.endsWith('сүресі')));
+  const bookSources = sources.filter(src => !src.isQuran && !(src.book && src.book.endsWith('сүресі')));
+  
+  for (const src of quranSources) {
+    const surahName = src.book.replace(" сүресі", "").trim().toLowerCase();
+    const verseNum = src.page || 1;
+    if (lowercaseAnswer.includes(surahName) && answer.includes(String(verseNum))) {
+      filtered.push(src);
+    }
+  }
+
+  // 2. Кітаптар үшін сүзгілеу:
+  const references: { book: string; page: number }[] = [];
+  const regex = /«([^»]+)»[^\d]*(\d+)/g;
+  let match;
+  while ((match = regex.exec(answer)) !== null) {
+    const bookName = match[1].trim().toLowerCase();
+    const pageNum = parseInt(match[2], 10);
+    references.push({ book: bookName, page: pageNum });
+  }
+
+  const matchedBooks: any[] = [];
+  if (references.length > 0) {
+    for (const src of bookSources) {
+      const srcBook = (src.book || '').toLowerCase().trim();
+      const srcPages = src.pages && Array.isArray(src.pages) ? src.pages.map(Number) : [src.page || 1];
+      
+      const matched = references.some(ref => {
+        const bookMatches = srcBook.includes(ref.book) || ref.book.includes(srcBook);
+        const pageMatches = srcPages.includes(ref.page);
+        return bookMatches && pageMatches;
+      });
+      
+      if (matched) {
+        matchedBooks.push(src);
+      }
+    }
+  }
+
+  if (matchedBooks.length > 0) {
+    filtered.push(...matchedBooks);
+  } else if (bookSources.length > 0) {
+    // Егер нақты сілтеме табылмаса, ең үздік жалғыз кітап дереккөзін ғана таңдаймыз
+    const bestBook = chooseBestSource(answer, bookSources);
+    if (bestBook) {
+      filtered.push(bestBook);
+    }
+  }
+
+  // Егер жалпы ештеңе өтпесе, fallback ретінде ең жақсы жалғыз деректі аламыз
+  if (filtered.length === 0 && sources.length > 0) {
+    const bestGlobal = chooseBestSource(answer, sources);
+    if (bestGlobal) {
+      filtered.push(bestGlobal);
+    }
+  }
+
+  return filtered;
 }
 
 
@@ -622,11 +767,16 @@ export function setupBot() {
       isAgentThinking = false;
       clearInterval(typingInterval);
 
-      // Егер осы сұраныста дәлелдер табылса, оларды Firestore-ға кэштейміз
+      let relevantSources: any[] = [];
       if (answerData.sources && answerData.sources.length > 0) {
+        relevantSources = filterSourcesByResponse(answerData.sources, answerData.answer);
+      }
+
+      // Егер осы сұраныста дәлелдер табылса, оларды Firestore-ға кэштейміз
+      if (relevantSources && relevantSources.length > 0) {
         if (db) {
           db.collection('users').doc(chatId).collection('topics').doc(threadStr).collection('latestSources').doc('current').set({
-            sources: answerData.sources,
+            sources: relevantSources,
             updatedAt: new Date()
           }).catch(e => console.error('[⚠️] Error caching latest sources:', e));
         }
@@ -638,7 +788,7 @@ export function setupBot() {
             if (cachedDoc.exists) {
               const cachedData = cachedDoc.data();
               if (cachedData && cachedData.sources && cachedData.sources.length > 0) {
-                answerData.sources = cachedData.sources;
+                relevantSources = cachedData.sources;
                 console.log(`[Cache] Restored ${cachedData.sources.length} sources from Firestore for query: "${query}"`);
               }
             }
@@ -648,8 +798,8 @@ export function setupBot() {
         }
       }
 
-      if (answerData.sources && answerData.sources.length > 0) {
-        const processed = processAndDeduplicateSources(answerData.sources);
+      if (relevantSources && relevantSources.length > 0) {
+        const processed = processAndDeduplicateSources(relevantSources);
         quranSources = processed.quranSources;
         bookSources = processed.bookSources;
         if (quranSources.length > 0 || bookSources.length > 0) {
@@ -829,7 +979,7 @@ export function setupBot() {
       await ctx.answerCbQuery('Сурет жүктелуде...');
 
       // Су белгісін қою (Watermark)
-      const imageBuffer = await addWatermark(sourceInfo.imageUrl, sourceInfo.book, sourceInfo.page);
+      const imageBuffer = await addWatermark(sourceInfo.imageUrl, sourceInfo.book, sourceInfo.page, sourceInfo.targetText);
 
       // Пайдаланушыға суретті жіберу
       await ctx.replyWithPhoto({ source: imageBuffer }, { caption: `📖 ${sourceInfo.book}, ${sourceInfo.page}-бет` });
@@ -853,21 +1003,28 @@ export function setupBot() {
 
       await ctx.answerCbQuery('Дәлел суреттері дайындалуда...');
 
-      const imageBuffers: { buffer: Buffer; book: string; page: number }[] = [];
+      // Суреттерге су белгісін параллельді Promise.all арқылы қосу
+      const results = await Promise.all(
+        sources.map(async (src) => {
+          try {
+            let customUrl = src.imageUrl || "";
+            if (customUrl) {
+              customUrl = customUrl.replace(/page_\d+\.png/g, `page_${src.page}.png`);
+            }
+            const buffer = await addWatermark(customUrl, src.book, src.page, src.targetText);
+            return {
+              buffer,
+              book: src.book,
+              page: src.page
+            };
+          } catch (err) {
+            console.error(`[❌] Суретке су белгісін қосу кезіндегі қате (${src.book}, бет ${src.page}):`, err);
+            return null;
+          }
+        })
+      );
 
-      // Суреттерге су белгісін қосу
-      for (const src of sources) {
-        try {
-          const imageBuffer = await addWatermark(src.imageUrl, src.book, src.page);
-          imageBuffers.push({
-            buffer: imageBuffer,
-            book: src.book,
-            page: src.page
-          });
-        } catch (err) {
-          console.error(`[❌] Суретке су белгісін қосу кезіндегі қате (${src.book}):`, err);
-        }
-      }
+      const imageBuffers = results.filter((res): res is { buffer: Buffer; book: string; page: number } => res !== null);
 
       if (imageBuffers.length === 0) {
         await ctx.answerCbQuery('Кешіріңіз, ешқандай суретті жүктеу мүмкін болмады.', { show_alert: true });

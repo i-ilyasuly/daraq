@@ -8,3 +8,6 @@ coverage/
 !.env.example
 firebase-key.json
 gcp-service-account.json
+*.txt
+*.pem
+/scripts/legacy_tests/

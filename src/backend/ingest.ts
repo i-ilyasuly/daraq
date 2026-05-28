@@ -1,6 +1,5 @@
 import fs from 'fs';
 import path from 'path';
-import { PDFParse } from 'pdf-parse';
 import { v4 as uuidv4 } from 'uuid';
 import { ai, embedText } from './rag/aiClient';
 import 'dotenv/config';
@@ -8,21 +7,39 @@ import { qdrant } from './db/qdrant';
 import { storage } from './storage';
 
 const QDRANT_COLLECTION = 'daraq_books';
-const BUCKET_NAME = process.env.GCS_BUCKET_NAME || 'daraq_books_bucket';
+const BUCKET_NAME = process.env.GCS_BUCKET_NAME || 'daraq-processed-images';
 
 import { tokenizeAndHash } from './rag/textUtils';
+import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
+import { createCanvas } from 'canvas';
+// pdfjsLib.GlobalWorkerOptions.workerSrc = 'node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs';
 
 /**
  * 1. PDF файлды оқу және парақтап мәтінін бөліп алу.
  */
 async function extractTextFromPDF(filePath: string) {
-  const dataBuffer = fs.readFileSync(filePath);
-  const parser = new PDFParse({ data: dataBuffer });
-  const textResult = await parser.getText();
-  await parser.destroy();
+  const data = new Uint8Array(fs.readFileSync(filePath));
+  const loadingTask = pdfjsLib.getDocument({
+    data,
+    standardFontDataUrl: 'node_modules/pdfjs-dist/standard_fonts/',
+  });
+  const pdfDocument = await loadingTask.promise;
+  
+  let fullText = '';
+  const pages: { num: number; text: string }[] = [];
+
+  for (let pageNum = 1; pageNum <= pdfDocument.numPages; pageNum++) {
+    const page = await pdfDocument.getPage(pageNum);
+    const textContent = await page.getTextContent();
+    const pageStrings = textContent.items.map((item: any) => item.str);
+    const text = pageStrings.join(' ');
+    fullText += text + '\n\n';
+    pages.push({ num: pageNum, text });
+  }
+
   return {
-    text: textResult.text || '',
-    pages: textResult.pages || []
+    text: fullText,
+    pages: pages
   };
 }
 
@@ -40,10 +57,12 @@ function splitIntoChunks(text: string, wordsPerChunk = 300) {
   return chunks;
 }
 
+import { extractCoordinatesFromImage, saveCoordinatesToGCS } from './rag/visionHighlight';
+
 /**
  * 5. PDF бетін суретке айналдырып, Google Cloud Storage-ге жүктеу.
  */
-async function uploadPageImageToGCS(pdfPath: string, pageNumber: number, bookName: string): Promise<string> {
+async function uploadPageImageToGCS(pdfPath: string, pageNumber: number, bookName: string, imageBuffer?: Buffer): Promise<string> {
   if (!storage) {
     console.warn("GCS қосылмаған. Сурет жүктеу өткізілді.");
     return "https://storage.googleapis.com/dummy/image.jpg";
@@ -51,12 +70,34 @@ async function uploadPageImageToGCS(pdfPath: string, pageNumber: number, bookNam
   try {
     const bucket = storage.bucket(BUCKET_NAME);
     const safeBookName = bookName.replace(/[^a-zA-Zа-яА-Я0-9-_]/g, '_');
-    const fileName = `${safeBookName}/page_${pageNumber}.jpg`;
+    const fileName = `${safeBookName}/page_${pageNumber}.png`;
     const gcsFile = bucket.file(fileName);
     
-    await gcsFile.save("dummy-image-content", {
-      metadata: { contentType: "image/jpeg" }
-    });
+    // Егер шынайы сурет Buffer берілсе, соны салып, Vision API қолданамыз
+    if (imageBuffer) {
+      await gcsFile.save(imageBuffer, {
+        resumable: false,
+        metadata: { contentType: "image/png" }
+      });
+      // Vision API арқылы сөз координаттарын алу
+      try {
+        const words = await extractCoordinatesFromImage(imageBuffer);
+        if (words.length > 0) {
+          await saveCoordinatesToGCS(bookName, pageNumber, words);
+          console.log(`[🎯] ${bookName} - ${pageNumber}-бет үшін координаттар сақталды (${words.length} сөз).`);
+        } else {
+          console.log(`[⚠️] ${bookName} - ${pageNumber}-беттен сөз табылмады.`);
+        }
+      } catch (visionErr) {
+        console.error(`[🚨] Vision API қатесі ${pageNumber}-бет үшін:`, visionErr);
+      }
+    } else {
+      await gcsFile.save("dummy-image-content", {
+        resumable: false,
+        metadata: { contentType: "image/png" }
+      });
+    }
+
     return `https://storage.googleapis.com/${BUCKET_NAME}/${fileName}`;
   } catch (err) {
     console.error("GCS жүктеу қатесі:", err);
@@ -73,23 +114,120 @@ export async function ingestBook(filePath: string, bookName: string) {
     const { text: fullText, pages: pdfPages } = await extractTextFromPDF(filePath);
     
     console.log(`[2] Мәтінді нақты парақтарға (pages) немесе chunk-терге бөлу...`);
-    let chunks: { text: string; page: number }[] = [];
+
+    console.log(`[2.5] Бұлтқа кітап суреттерін және координаттарын (Vision API) талдап жүктеу...`);
+    
+    const data = new Uint8Array(fs.readFileSync(filePath));
+    const loadingTask = pdfjsLib.getDocument({
+      data,
+      standardFontDataUrl: 'node_modules/pdfjs-dist/standard_fonts/',
+      cMapUrl: 'node_modules/pdfjs-dist/cmaps/',
+      cMapPacked: true,
+    });
+    const pdfDocument = await loadingTask.promise;
+    
+    const uploadedImagesMap = new Map<number, string>();
+
+    for (let pageNum = 1; pageNum <= pdfDocument.numPages; pageNum++) {
+      try {
+        console.log(` - ${pageNum} бетін суретке айналдыру және өңдеу...`);
+        const page = await pdfDocument.getPage(pageNum);
+        const viewport = page.getViewport({ scale: 2.0 });
+        const canvas = createCanvas(viewport.width, viewport.height);
+        const context = canvas.getContext('2d');
+        const renderContext = { canvasContext: context as any, viewport: viewport } as any;
+        
+        await page.render(renderContext).promise;
+
+        // Manual text rendering hack because node-canvas lacks native PDFJS text rendering hooks
+        const textContent = await page.getTextContent();
+        context.fillStyle = 'black';
+        for (const item of textContent.items as any[]) {
+          // pdfjs transform matrix mapping to viewport
+          const tx = pdfjsLib.Util.transform(viewport.transform, item.transform);
+          const x = tx[4];
+          const y = tx[5];
+          // Determine font size roughly based on transform scale
+          const fontSize = Math.abs(tx[0]);
+          context.font = `${fontSize}px sans-serif`;
+          context.fillText(item.str, x, y);
+        }
+
+        const imageBuffer = canvas.toBuffer('image/png');
+
+        if (imageBuffer) {
+           const imageUrl = await uploadPageImageToGCS(filePath, pageNum, bookName, imageBuffer);
+           uploadedImagesMap.set(pageNum, imageUrl);
+        }
+      } catch (err) {
+        console.warn(`[⚠️] ${pageNum} бетті суретке айналдыру қатесі:`, err);
+        const imageUrl = await uploadPageImageToGCS(filePath, pageNum, bookName);
+        uploadedImagesMap.set(pageNum, imageUrl);
+      }
+    }
+
+    let chunks: { text: string; pages: number[] }[] = [];
+
+    let concatenatedText = "";
+    const offsetMap: { page: number; start: number; end: number }[] = [];
 
     if (pdfPages && pdfPages.length > 0) {
       for (const p of pdfPages) {
-        const pageText = p.text.trim();
+        const pageText = p.text || "";
         const pageNumber = p.num;
-        if (pageText.length < 10) continue;
-        const wordChunks = splitIntoChunks(pageText, 300);
-        for (const chunkText of wordChunks) {
-          if (chunkText.trim().length > 10) {
-            chunks.push({ text: chunkText.trim(), page: pageNumber });
-          }
-        }
+        const start = concatenatedText.length;
+        concatenatedText += pageText + "\n";
+        const end = concatenatedText.length;
+        offsetMap.push({ page: pageNumber, start, end });
       }
     } else {
-      const wordChunks = splitIntoChunks(fullText, 300);
-      chunks = wordChunks.map((text, idx) => ({ text, page: idx + 1 }));
+      concatenatedText = fullText || "";
+      offsetMap.push({ page: 1, start: 0, end: concatenatedText.length });
+    }
+
+    // Split text into contiguous 200-500 word chunks with overlap and trace back to pages
+    const wordRegex = /\S+/g;
+    const words: { word: string; start: number; end: number }[] = [];
+    let wordMatch: RegExpExecArray | null;
+    while ((wordMatch = wordRegex.exec(concatenatedText)) !== null) {
+      words.push({
+        word: wordMatch[0],
+        start: wordMatch.index,
+        end: wordMatch.index + wordMatch[0].length
+      });
+    }
+
+    if (words.length > 0) {
+      const wordsPerChunk = 300;
+      const overlap = 50;
+      const step = wordsPerChunk - overlap > 0 ? wordsPerChunk - overlap : wordsPerChunk;
+
+      for (let i = 0; i < words.length; i += step) {
+        const chunkWords = words.slice(i, i + wordsPerChunk);
+        if (chunkWords.length === 0) break;
+
+        const startChar = chunkWords[0].start;
+        const endChar = chunkWords[chunkWords.length - 1].end;
+        const chunkText = concatenatedText.substring(startChar, endChar);
+
+        if (chunkText.trim().length > 10) {
+          const chunkPages: number[] = [];
+          for (const entry of offsetMap) {
+            // Overlap check: entry.start < endChar AND entry.end > startChar
+            if (entry.start < endChar && entry.end > startChar) {
+              chunkPages.push(entry.page);
+            }
+          }
+          if (chunkPages.length === 0) {
+            chunkPages.push(1);
+          }
+          chunks.push({ text: chunkText.trim(), pages: chunkPages });
+        }
+
+        if (i + wordsPerChunk >= words.length) {
+          break;
+        }
+      }
     }
 
     // Qdrant коллекциясын тексереміз және Hybrid Search дайындаймыз
@@ -140,12 +278,13 @@ export async function ingestBook(filePath: string, bookName: string) {
 
     console.log(`[3] Векторлау (Embeddings & Sparse) және [4] Сақтау...`);
     for (let i = 0; i < chunks.length; i++) {
-      const { text: chunkText, page: pageNumber } = chunks[i];
-      await new Promise(res => setTimeout(res, 1200));
+      const { text: chunkText, pages: chunkPages } = chunks[i];
+      const pageNumber = chunkPages[0] || 1;
+      await new Promise(res => setTimeout(res, 2200));
 
       let embeddingResponse;
-      let retries = 4;
-      let waitMs = 4000;
+      let retries = 6;
+      let waitMs = 5000;
       while (retries > 0) {
         try {
           embeddingResponse = await embedText({
@@ -156,7 +295,8 @@ export async function ingestBook(filePath: string, bookName: string) {
           break;
         } catch (err: any) {
           const errorMsg = String(err?.message || err);
-          if ((err.status === 429 || errorMsg.includes("429") || errorMsg.toLowerCase().includes("quota")) && retries > 1) {
+          console.warn(`[⚠️] Embedding failed, retrying in ${waitMs}ms (${retries} entries left)... Error:`, errorMsg);
+          if (retries > 1) {
             await new Promise(res => setTimeout(res, waitMs));
             retries--;
             waitMs *= 2;
@@ -169,9 +309,11 @@ export async function ingestBook(filePath: string, bookName: string) {
       let denseVector = embeddingResponse?.embeddings?.[0]?.values;
       if (!denseVector) throw new Error("Ембеддинг жасалмады.");
 
-      // Егер monkey-patch 768 өлшемді модельге түсіп кетсе, 1536 етіп нөлдермен толтырамыз
-      if (denseVector.length === 768) {
-         denseVector = [...denseVector, ...Array(768).fill(0)];
+      // Егер балама модель өлшемі 1536-дан өзгеше болса (мысалы 3072 немесе 768), оны автоматты түрде реттейміз (Ережелерге сай)
+      if (denseVector.length > 1536) {
+        denseVector = denseVector.slice(0, 1536);
+      } else if (denseVector.length < 1536) {
+        denseVector = [...denseVector, ...Array(1536 - denseVector.length).fill(0)];
       }
 
       // Sparse вектор жасау
@@ -184,6 +326,7 @@ export async function ingestBook(filePath: string, bookName: string) {
       const metadata = {
         book: bookName,
         page: pageNumber,
+        pages: chunkPages,
         text: chunkText,
         imageUrl,
         language: "kk",
@@ -206,7 +349,7 @@ export async function ingestBook(filePath: string, bookName: string) {
           ]
         });
       }
-      console.log(`[✅] Бет ${pageNumber}/${chunks.length} сәтті өңделіп, индекстелді.`);
+      console.log(`[✅] Беттер [${chunkPages.join(', ')}] (бөлік ${i + 1}/${chunks.length}) сәтті өңделіп, индекстелді.`);
     }
     console.log(`[ТАМАША] "${bookName}" кітабы толығымен жүйеге енгізілді.`);
   } catch (error) {
@@ -215,7 +358,7 @@ export async function ingestBook(filePath: string, bookName: string) {
 }
 
 // Скриптті тікелей іске қосу үшін (мысалы: npx tsx src/backend/ingest.ts ./dummy.pdf "Сапар фикхы")
-const isMainModule = typeof process !== 'undefined' && process.argv && process.argv[1] && process.argv[1].endsWith('ingest.ts');
+const isMainModule = typeof process !== 'undefined' && process.argv && process.argv[1] && path.basename(process.argv[1]) === 'ingest.ts';
 if (isMainModule) {
   const args = process.argv.slice(2);
   const pdfPath = args[0];

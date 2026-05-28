@@ -1,5 +1,5 @@
 import { qdrant } from '../db/qdrant';
-import { ai, embedText } from './aiClient';
+import { ai, embedText, GEMINI_EMBEDDING_MODEL } from './aiClient';
 import { SearchResult } from './searchService';
 import crypto from 'crypto';
 
@@ -16,7 +16,7 @@ export async function checkCache(query: string): Promise<{ hit: CacheEntry | nul
 
   try {
     const embeddingResponse = await embedText({
-      model: 'gemini-embedding-2',
+      model: GEMINI_EMBEDDING_MODEL,
       contents: query,
       config: {
         taskType: 'RETRIEVAL_QUERY',
@@ -69,7 +69,7 @@ export async function writeCache(query: string, answer: string, sources: SearchR
 
   try {
     const embeddingResponse = await embedText({
-      model: 'gemini-embedding-2',
+      model: GEMINI_EMBEDDING_MODEL,
       contents: query,
       config: {
         taskType: 'RETRIEVAL_DOCUMENT',

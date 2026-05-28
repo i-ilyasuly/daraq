@@ -66,39 +66,391 @@ if (!fs.existsSync(serviceAccountPath) && process.env.FIREBASE_PRIVATE_KEY && pr
 let saProjectId = 'momyn-t1'; 
 const hasServiceAccountFile = fs.existsSync(serviceAccountPath);
 
-const aiOptions: any = {
+// 1. Initialize Google AI Studio Client (Primary)
+const aiStudioOptions: any = {
+  apiKey: process.env.GEMINI_API_KEY,
   httpOptions: {
     headers: {
-      'User-Agent': 'aistudio-build',
+      'User-Agent': 'aistudio-build-studio',
     }
   }
 };
+const aiStudio = new GoogleGenAI(aiStudioOptions);
 
-// --- ҚАУІПСІЗДІК ҮШІН VERTEX AI ӨШІРІЛДІ ---
-// Болашақта іске қосу қажет болса, мына айнымалыны true деп өзгертіңіз:
-const USE_VERTEX_AI = false;
-
-if (USE_VERTEX_AI && hasServiceAccountFile) {
-  process.env.GOOGLE_APPLICATION_CREDENTIALS = serviceAccountPath;
-  aiOptions.vertexai = true;
-  aiOptions.project = saProjectId;
-  aiOptions.location = 'us-central1';
-  console.log(`[🚀] Vertex AI (Service Account) дайындалды. Жоба: ${saProjectId}`);
-} else {
-  aiOptions.apiKey = process.env.GEMINI_API_KEY;
-  console.warn(`[⚠️] Google AI Studio API Key қолданылуда.`);
+// 2. Initialize Vertex AI Client (Secondary / GCP Billing backed)
+let vertexAi: GoogleGenAI | null = null;
+if (hasServiceAccountFile) {
+  try {
+    process.env.GOOGLE_APPLICATION_CREDENTIALS = serviceAccountPath;
+    vertexAi = new GoogleGenAI({
+      vertexai: true,
+      project: saProjectId,
+      location: 'us-central1',
+      httpOptions: {
+        headers: {
+          'User-Agent': 'aistudio-build-vertex',
+        }
+      }
+    });
+    console.log(`[🚀] Vertex AI (Service Account) secondary client loaded. Project: ${saProjectId}`);
+  } catch (e) {
+    console.error("[⚠️] Failed to load Vertex AI secondary client:", e);
+  }
 }
 
-export const ai = new GoogleGenAI(aiOptions);
+// Export the primary client name expected by external code
+export const ai = aiStudio;
 
-// --- Robust Monkey Patching for Vertex AI Availability ---
-// (Қазіргі уақытта AI Studio қолданылып жатқандықтан уақытша істен шығарылған)
-/*
-function wrapResult(res: any) { ... }
-ai.models.generateContent = async function(args: any) { ... }
-ai.models.generateContentStream = async function(args: any) { ... }
-ai.models.embedContent = async function(args: any) { ... }
-*/
+// --- Dual-Resolver Monkey Patching for Maximum Resilience ---
+const originalGenerateContent = aiStudio.models.generateContent.bind(aiStudio.models);
+const originalGenerateContentStream = aiStudio.models.generateContentStream.bind(aiStudio.models);
+const originalEmbedContent = aiStudio.models.embedContent.bind(aiStudio.models);
+
+let isAiStudioDepleted = false;
+
+function checkDepleted(err: any): boolean {
+  if (!err) return false;
+  const errorStr = String(err?.message || err).toLowerCase();
+  return (
+    errorStr.includes("prepayment credits are depleted") ||
+    errorStr.includes("depleted") ||
+    errorStr.includes("resource_exhausted") ||
+    errorStr.includes("billing") ||
+    errorStr.includes("quota") ||
+    errorStr.includes("429")
+  );
+}
+
+function mapModelForVertex(modelName: string): string {
+  const clean = String(modelName || '').toLowerCase();
+  if (clean.includes('embed')) {
+    return 'text-multilingual-embedding-002';
+  }
+  if (clean.includes('pro')) {
+    return 'gemini-1.5-pro';
+  }
+  // All other flash/lite or unknown models:
+  return 'gemini-2.5-flash';
+}
+
+aiStudio.models.generateContent = async function(args: any) {
+  const initialModel = args?.model || '';
+  let cleanedArgs = { ...args };
+  if (!initialModel.includes('thinking') && cleanedArgs.config?.thinkingConfig) {
+    cleanedArgs.config = { ...cleanedArgs.config };
+    delete cleanedArgs.config.thinkingConfig;
+  }
+
+  // Safe helper to invoke on Vertex AI secondary client
+  const tryVertex = async (params: any) => {
+    if (vertexAi) {
+      const mappedModel = mapModelForVertex(params.model);
+      console.log(`[🔄] Redirecting generation to Vertex AI client with model '${mappedModel}' (original: '${params.model}')...`);
+      const vertexParams = { ...params, model: mappedModel };
+      return await vertexAi.models.generateContent(vertexParams);
+    }
+    throw new Error("Vertex AI client is not available.");
+  };
+
+  // If we already know AI Studio is depleted, bypass it completely!
+  if (isAiStudioDepleted && vertexAi) {
+    try {
+      return await tryVertex(cleanedArgs);
+    } catch (vertexErr: any) {
+      console.warn(`[⚠️] Direct Vertex AI generation attempt failed:`, vertexErr.message || vertexErr);
+    }
+  }
+
+  try {
+    // Stage 1: Try Primary AI Studio Client
+    return await originalGenerateContent(cleanedArgs);
+  } catch (err: any) {
+    if (checkDepleted(err)) {
+      isAiStudioDepleted = true;
+    }
+    const errorStr = String(err?.message || err).toLowerCase();
+    
+    // Only log if we did not already bypass
+    console.warn(`[⚠️] AI Studio Generation error with model ${initialModel}:`, errorStr);
+
+    // If thinking config is not supported, strip and retry on AI Studio first
+    if (!isAiStudioDepleted && (errorStr.includes('thinking_level') || errorStr.includes('thinkingconfig') || errorStr.includes('thinking_level is not supported'))) {
+      if (args.config?.thinkingConfig) {
+        console.log(`[🔄] Stripping thinkingConfig and retrying on AI Studio for '${initialModel}'...`);
+        const strippedArgs = { ...args };
+        strippedArgs.config = { ...strippedArgs.config };
+        delete strippedArgs.config.thinkingConfig;
+        try {
+          return await originalGenerateContent(strippedArgs);
+        } catch (retryErr: any) {
+          err = retryErr;
+          if (checkDepleted(retryErr)) {
+            isAiStudioDepleted = true;
+          }
+        }
+      }
+    }
+
+    // Stage 2: Try Primary Model mapping on Secondary Vertex AI Client
+    if (vertexAi) {
+      try {
+        const vertexArgs = { ...cleanedArgs };
+        if (vertexArgs.config) {
+          vertexArgs.config = { ...vertexArgs.config };
+          delete vertexArgs.config.thinkingConfig;
+        }
+        return await tryVertex(vertexArgs);
+      } catch (vertexErr: any) {
+        console.warn(`[⚠️] Vertex AI original model generation failed too:`, vertexErr.message || vertexErr);
+      }
+    }
+
+    // Stage 3: Cascade fallbacks through both AI Studio and Vertex AI
+    const fallbackModels = ['gemini-2.5-flash', 'gemini-1.5-flash'];
+    for (const fallbackModel of fallbackModels) {
+      console.log(`[🔄] Cascading content generation fallback to: '${fallbackModel}'...`);
+      const fallbackArgs = { ...args, model: fallbackModel };
+      if (fallbackArgs.config) {
+        fallbackArgs.config = { ...fallbackArgs.config };
+        delete fallbackArgs.config.thinkingConfig;
+      }
+
+      // Try AI Studio fallback
+      if (!isAiStudioDepleted) {
+        try {
+          return await originalGenerateContent(fallbackArgs);
+        } catch (studioErr: any) {
+          if (checkDepleted(studioErr)) {
+            isAiStudioDepleted = true;
+          }
+          console.warn(`[⚠️] AI Studio fallback to '${fallbackModel}' failed:`, studioErr.message || studioErr);
+        }
+      }
+      
+      // Try Vertex AI fallback
+      if (vertexAi) {
+        try {
+          return await tryVertex(fallbackArgs);
+        } catch (vertexEnvErr: any) {
+          console.warn(`[⚠️] Vertex AI fallback to '${fallbackModel}' failed:`, vertexEnvErr.message || vertexEnvErr);
+        }
+      }
+    }
+    throw err;
+  }
+};
+
+aiStudio.models.generateContentStream = async function(args: any) {
+  const initialModel = args?.model || '';
+  let cleanedArgs = { ...args };
+  if (!initialModel.includes('thinking') && cleanedArgs.config?.thinkingConfig) {
+    cleanedArgs.config = { ...cleanedArgs.config };
+    delete cleanedArgs.config.thinkingConfig;
+  }
+
+  // Safe helper to invoke stream on Vertex AI
+  const tryVertexStream = async (params: any) => {
+    if (vertexAi) {
+      const mappedModel = mapModelForVertex(params.model);
+      console.log(`[🔄] Redirecting stream to Vertex AI client with model '${mappedModel}' (original: '${params.model}')...`);
+      const vertexParams = { ...params, model: mappedModel };
+      return await vertexAi.models.generateContentStream(vertexParams);
+    }
+    throw new Error("Vertex AI client is not available.");
+  };
+
+  // If we already know AI Studio is depleted, bypass it completely!
+  if (isAiStudioDepleted && vertexAi) {
+    try {
+      return await tryVertexStream(cleanedArgs);
+    } catch (vertexErr: any) {
+      console.warn(`[⚠️] Direct Vertex AI stream generation attempt failed:`, vertexErr.message || vertexErr);
+    }
+  }
+
+  try {
+    // Stage 1: Try Primary AI Studio Client
+    return await originalGenerateContentStream(cleanedArgs);
+  } catch (err: any) {
+    if (checkDepleted(err)) {
+      isAiStudioDepleted = true;
+    }
+    const errorStr = String(err?.message || err).toLowerCase();
+    console.warn(`[⚠️] AI Studio Generation stream error with model ${initialModel}:`, errorStr);
+
+    // If thinking config is not supported, strip and retry on AI Studio first
+    if (!isAiStudioDepleted && (errorStr.includes('thinking_level') || errorStr.includes('thinkingconfig') || errorStr.includes('thinking_level is not supported'))) {
+      if (args.config?.thinkingConfig) {
+        console.log(`[🔄] Stripping thinkingConfig and retrying stream on AI Studio for '${initialModel}'...`);
+        const strippedArgs = { ...args };
+        strippedArgs.config = { ...strippedArgs.config };
+        delete strippedArgs.config.thinkingConfig;
+        try {
+          return await originalGenerateContentStream(strippedArgs);
+        } catch (retryErr: any) {
+          err = retryErr;
+          if (checkDepleted(retryErr)) {
+            isAiStudioDepleted = true;
+          }
+        }
+      }
+    }
+
+    // Stage 2: Try Primary Model mapping on Vertex AI
+    if (vertexAi) {
+      try {
+        const vertexArgs = { ...cleanedArgs };
+        if (vertexArgs.config) {
+          vertexArgs.config = { ...vertexArgs.config };
+          delete vertexArgs.config.thinkingConfig;
+        }
+        return await tryVertexStream(vertexArgs);
+      } catch (vertexErr: any) {
+        console.warn(`[⚠️] Vertex AI original model stream generation failed too:`, vertexErr.message || vertexErr);
+      }
+    }
+
+    // Stage 3: Cascade fallbacks for Stream
+    const fallbackModels = ['gemini-2.5-flash', 'gemini-1.5-flash'];
+    for (const fallbackModel of fallbackModels) {
+      console.log(`[🔄] Cascading stream generation fallback to: '${fallbackModel}'...`);
+      const fallbackArgs = { ...args, model: fallbackModel };
+      if (fallbackArgs.config) {
+        fallbackArgs.config = { ...fallbackArgs.config };
+        delete fallbackArgs.config.thinkingConfig;
+      }
+
+      // Try AI Studio fallback
+      if (!isAiStudioDepleted) {
+        try {
+          return await originalGenerateContentStream(fallbackArgs);
+        } catch (studioErr: any) {
+          if (checkDepleted(studioErr)) {
+            isAiStudioDepleted = true;
+          }
+          console.warn(`[⚠️] AI Studio stream fallback to '${fallbackModel}' failed:`, studioErr.message || studioErr);
+        }
+      }
+      
+      // Try Vertex fallback
+      if (vertexAi) {
+        try {
+          return await tryVertexStream(fallbackArgs);
+        } catch (vertexEnvErr: any) {
+          console.warn(`[⚠️] Vertex AI stream fallback to '${fallbackModel}' failed:`, vertexEnvErr.message || vertexEnvErr);
+        }
+      }
+    }
+    throw err;
+  }
+};
+
+aiStudio.models.embedContent = async function(args: any) {
+  const initialModel = args?.model || '';
+  let cleanedArgs = { ...args };
+  if (cleanedArgs.config) {
+    cleanedArgs.config = { ...cleanedArgs.config };
+    delete cleanedArgs.config.outputDimensionality;
+  }
+
+  // Safe helper to invoke embedding on Vertex AI
+  const tryVertexEmbed = async (params: any) => {
+    if (vertexAi) {
+      const mappedModel = mapModelForVertex(params.model);
+      console.log(`[🔄] Redirecting embedding to Vertex AI client with model '${mappedModel}' (original: '${params.model}')...`);
+      const vertexParams = { ...params, model: mappedModel };
+      return await vertexAi.models.embedContent(vertexParams);
+    }
+    throw new Error("Vertex AI client is not available.");
+  };
+
+  const normalizeResponse = (res: any) => {
+    if (res?.embeddings) {
+      for (const emb of res.embeddings) {
+        if (emb?.values) {
+          let denseVector = emb.values;
+          if (denseVector.length > 1536) {
+            emb.values = denseVector.slice(0, 1536);
+          } else if (denseVector.length < 1536) {
+            emb.values = [...denseVector, ...Array(1536 - denseVector.length).fill(0)];
+          }
+        }
+      }
+    }
+    return res;
+  };
+
+  // If we already know AI Studio is depleted, bypass it completely!
+  if (isAiStudioDepleted && vertexAi) {
+    try {
+      const res = await tryVertexEmbed(cleanedArgs);
+      return normalizeResponse(res);
+    } catch (vertexErr: any) {
+      console.warn(`[⚠️] Direct Vertex AI embedding attempt failed:`, vertexErr.message || vertexErr);
+    }
+  }
+
+  try {
+    // Stage 1: Try Primary AI Studio Client
+    const res = await originalEmbedContent(cleanedArgs);
+    return normalizeResponse(res);
+  } catch (err: any) {
+    if (checkDepleted(err)) {
+      isAiStudioDepleted = true;
+    }
+    const errorStr = String(err?.message || err).toLowerCase();
+    
+    // Only log if we did not already bypass
+    console.warn(`[⚠️] AI Studio Embedding error with model ${initialModel}:`, errorStr);
+
+    // Stage 2: Try Vertex AI with same model
+    if (vertexAi) {
+      try {
+        const res = await tryVertexEmbed(cleanedArgs);
+        return normalizeResponse(res);
+      } catch (vertexErr: any) {
+        console.warn(`[⚠️] Vertex AI original model embedding failed too:`, vertexErr.message || vertexErr);
+      }
+    }
+
+    // Stage 3: Cascade fallback models (with different names tailored to Vertex and AI Studio)
+    const fallbackEmbeddingModels = [
+      'text-multilingual-embedding-002',
+      'text-embedding-004',
+      'gemini-embedding-2-preview',
+      'gemini-embedding-001'
+    ];
+
+    for (const fallbackModel of fallbackEmbeddingModels) {
+      console.log(`[🔄] Cascading embedding fallback to: '${fallbackModel}'...`);
+      const fallbackArgs = { ...cleanedArgs, model: fallbackModel };
+
+      // Try AI Studio
+      if (!isAiStudioDepleted) {
+        try {
+          const res = await originalEmbedContent(fallbackArgs);
+          return normalizeResponse(res);
+        } catch (studioErr: any) {
+          if (checkDepleted(studioErr)) {
+            isAiStudioDepleted = true;
+          }
+          console.warn(`[⚠️] AI Studio embedding fallback to '${fallbackModel}' failed:`, studioErr.message || studioErr);
+        }
+      }
+      
+      // Try Vertex AI
+      if (vertexAi) {
+        try {
+          const res = await tryVertexEmbed(fallbackArgs);
+          return normalizeResponse(res);
+        } catch (vertexEnvErr: any) {
+          console.warn(`[⚠️] Vertex AI embedding fallback to '${fallbackModel}' failed:`, vertexEnvErr.message || vertexEnvErr);
+        }
+      }
+    }
+    throw err;
+  }
+};
 
 /**
  * Robust helper for embedding text
@@ -120,4 +472,9 @@ export async function generateContentFixed(args: any) {
 export async function generateContentStreamFixed(args: any) {
   return await ai.models.generateContentStream(args);
 }
+
+// Configurable model definitions from environment variables
+export const GEMINI_EMBEDDING_MODEL = process.env.GEMINI_EMBEDDING_MODEL || 'gemini-embedding-2';
+export const GEMINI_GENERATION_MODEL = process.env.GEMINI_GENERATION_MODEL || 'gemini-flash-lite-latest';
+export const GEMINI_INTENT_MODEL = process.env.GEMINI_INTENT_MODEL || 'gemini-flash-lite-latest';
 

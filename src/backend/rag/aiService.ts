@@ -1,9 +1,9 @@
 import { db } from '../db/firestore';
 import { SearchResult, searchAnswers } from './searchService';
-import { ai, generateContentFixed, generateContentStreamFixed } from './aiClient';
+import { ai, generateContentFixed, generateContentStreamFixed, GEMINI_GENERATION_MODEL, GEMINI_INTENT_MODEL } from './aiClient';
 import { fetchSingleVerse, searchQuran } from './quranService';
 import { checkCache, writeCache } from './cacheService';
-import { Type } from '@google/genai';
+import { Type, ThinkingLevel } from '@google/genai';
 import 'dotenv/config';
 
 // 2. LLM-ге арналған System Prompt (Жүйелік нұсқаулық)
@@ -42,35 +42,53 @@ const CHITCHAT_SYSTEM_PROMPT = `Сен — Daraq, білімді, мейірім
 ЕШҚАНДАЙ бөтен тегтерді (<thought> т.б.) қолданба! Тек қана қарапайым сөйлеммен жылы жауап қайтар.
 Таза Telegram HTML тегтерін қолдануға болады: <b> (жуан), <i> (көлбеу).`;
 
-const INTENT_CLASSIFIER_PROMPT = `Сен — Daraq, Ханафи мазһабының виртуалды ұстазының ниетін анықтаушы көмекшісің. Пайдаланушының сұрағын оқып, оны ЕКІ санаттың біріне жатқыз. Басқа ешнәрсе жазба.
-
-Санаттар:
-1. CHITCHAT: Егер сұрақ сәлемдесу ("сәлем", "ассалаумағалейкум"), алғыс айту ("рахмет", "көп рахмет"), өзің туралы сұрау ("сен кімсің", "қалың қалай") немесе діни ізденісті/ақпаратты қажет етпейтін қарапайым әңгіме болса.
-2. KNOWLEDGE_SEARCH: Егер сұрақ нақты діни үкімді, Құранды, хадисті, фиқһ мәселесін немесе қандай да бір ақпарат іздеуді талап етсе. Тіпті сұрақ қысқа немесе түсініксіз ("ораза", "намаз", "үкім") болса да осы санатқа жатқыз.
-
-Тек CHITCHAT немесе KNOWLEDGE_SEARCH деп қана жауап бер.`;
-
 async function classifyIntent(query: string, history: {role: string, parts: any[]}[]): Promise<'CHITCHAT' | 'KNOWLEDGE_SEARCH'> {
-  try {
-     const res = await generateContentFixed({
-         model: 'gemini-3.1-flash-lite',
-         contents: [
-            ...history,
-            { role: 'user', parts: [{ text: `Пайдаланушы сұрағы: "${query}"\n\nТек CHITCHAT немесе KNOWLEDGE_SEARCH сөзін қайтар:` }] }
-         ],
-         config: {
-            systemInstruction: INTENT_CLASSIFIER_PROMPT,
-            temperature: 0.1
-         }
-     });
-
-     let result = res?.text?.trim().toUpperCase() || 'KNOWLEDGE_SEARCH';
-     if (result.includes('CHITCHAT')) return 'CHITCHAT';
-     return 'KNOWLEDGE_SEARCH';
-  } catch (err) {
-     console.warn('[AI] Intent Classification қатесі:', err);
-     return 'KNOWLEDGE_SEARCH'; // Default fallback on error
+  const clean = query.trim().toLowerCase();
+  
+  // 1. Ұзын мәтіндер әметте діни немесе талдауды қажет ететін үлкен сұрақтар
+  if (clean.length > 100) {
+    return 'KNOWLEDGE_SEARCH';
   }
+
+  // 2. Діни негізгі кілт сөздер (мұндайда міндетті түрде кітаптарды іздеу керек)
+  const religiousKeywords = [
+    'намаз', 'ораза', 'дәрет', 'дарет', 'аят', 'сүре', 'суре', 'хадис', 'үндеу', 'үкім', 'укім', 'парыз', 'сүннет', 'суннет', 
+    'уәжіп', 'уажип', 'халал', 'харам', 'мәкруһ', 'макрух', 'мустахаб', 'неке', 'талақ', 'талак', 'зекет', 'ажырасу', 'қаза', 'каза',
+    'сапар', 'мүсәпір', 'мусапир', 'құран', 'куран', 'аллаһ', 'аллах', 'құдай', 'кудай', 'пайғамбар', 'пайгамбар',
+    'күнә', 'куна', 'жәннат', 'жаннат', 'тозақ', 'тозак', 'ислам', 'дін', 'дин', 'иман', 'періште', 'периште', 'жұма', 'жума',
+    'ақша', 'акша', 'несие', 'банк', 'пайыз', 'өсім', 'осим', 'сауда', 'тамақ', 'тамак', 'ет', 'шошқа', 'шошка', 'арақ', 'арак'
+  ];
+
+  for (const kw of religiousKeywords) {
+    if (clean.includes(kw)) {
+      return 'KNOWLEDGE_SEARCH';
+    }
+  }
+
+  // 3. Сәлемдесу, алғыс, қоштасу және жалпы қарапайым кілт сөздері (CHITCHAT)
+  const chitchatKeywords = [
+    'сәлем', 'салем', 'ассалау', 'ассаламу', 'алейкум', 'әлейкум', 'қалайсың', 'қалайсыз', 'қалайсын', 'амансыз',
+    'рахмет', 'рақмет', 'ризамын', 'алғыс', 'алгыс', 'сүйем', 'суйем', 'жақсы көрем', 'жаксы корем',
+    'рахмет', 'спасибо', 'благодарю', 'привет', 'здравствуйте', 'салам',
+    'сен кімсің', 'сен кімсін', 'атың кім', 'не істей аласың', 'не істей аласын', 'сен не істейсің', 'сен не істейсин',
+    'кто ты', 'как зовут', 'что умеешь',
+    'сау бол', 'сау болыңыз', 'сау болыныз', 'көріскенше', 'корискенше', 'пока', 'до свидания',
+    'керемет', 'тамаша', 'күшті', 'кушти', 'жақсы', 'жаксы', 'окей', 'ok', 'жарайды'
+  ];
+
+  for (const kw of chitchatKeywords) {
+    if (clean.includes(kw)) {
+      return 'CHITCHAT';
+    }
+  }
+
+  // 4. Тек өте қысқа сөздер немесе фразалар болса (мысалы, "қалай", "иә", "жоқ", "нәтиже")
+  if (clean.length < 20) {
+    return 'CHITCHAT';
+  }
+
+  // Әйтпесе, толыққанды діни Іздеуді немесе нақты сұрақ ретінде қабылдаймыз
+  return 'KNOWLEDGE_SEARCH';
 }
 
 export interface AnswerResult {
@@ -256,9 +274,14 @@ ${hit.answer}
         
         let fastAnswerText = "";
         const fastStream = await generateContentStreamFixed({
-            model: 'gemini-3.1-flash-lite',
+            model: GEMINI_GENERATION_MODEL,
             contents: [{ role: 'user', parts: [{ text: fastCachePrompt }] }],
-            config: { temperature: 0.3 }
+            config: {
+                temperature: 0.1,
+                thinkingConfig: {
+                    thinkingLevel: ThinkingLevel.MINIMAL
+                }
+            }
         });
 
         for await (const chunk of fastStream) {
@@ -293,14 +316,17 @@ ${hit.answer}
     if (intent === 'CHITCHAT') {
         console.log(`[⚡] Fast Track (CHITCHAT) іске қосылды...`);
         const responseStream = await generateContentStreamFixed({
-            model: 'gemini-3.1-flash-lite',
+            model: GEMINI_GENERATION_MODEL,
             contents: [
                 ...history,
                 { role: 'user', parts: [{ text: currentPrompt }] }
             ],
             config: {
                 systemInstruction: CHITCHAT_SYSTEM_PROMPT,
-                temperature: 0.7
+                temperature: 0.1,
+                thinkingConfig: {
+                    thinkingLevel: ThinkingLevel.MINIMAL
+                }
             }
         });
 
@@ -446,11 +472,14 @@ ${contextText}
     ];
 
     const responseStream = await generateContentStreamFixed({
-      model: 'gemini-3.1-flash-lite',
+      model: GEMINI_GENERATION_MODEL,
       contents: contents,
       config: {
         systemInstruction: SYSTEM_PROMPT,
-        temperature: 0.1
+        temperature: 0.1,
+        thinkingConfig: {
+          thinkingLevel: ThinkingLevel.MINIMAL
+        }
       }
     });
 

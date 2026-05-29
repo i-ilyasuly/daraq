@@ -534,3 +534,46 @@ export async function generateAnswer(
     threadId
   );
 }
+
+/**
+ * Үлкен мәтін ішінен қолданушының сұрағына нақты жауап бола алатын сөйлемді (extract) тауып алу.
+ */
+export async function findExactQuoteForHighlight(query: string, chunkText: string): Promise<string> {
+  if (!query || !chunkText) return chunkText;
+  
+  const prompt = `Сен — Қазақ тіліндегі дәлдік бойынша мәтін анализаторысың.
+Сенің мақсатың: төменде берілген ТҮПНҰСҚА МӘТІН ішінен СҰРАҚ-қа дәл және нақты жауап бола алатын, дәлел бола алатын сөйлемді немесе сөйлемдерді ҒАНА бөліп алып (көшіріп) шығару. Ешқандай өзгеріссіз түпнұсқадан қалай болды солай ал.
+
+ЕГЕР түпнұсқа мәтінде жауап жоқ болса немесе түсініксіз болса, мәтіннің алғашқы сөйлемін ғана шығар.
+Сенің жауабың ТЕК ҚАНА бөліп алынған сөйлем болуы керек. Басқа ешқандай түсініктеме қоспа. Жартылай кесіп тастама, сөйлемді толығымен шығар.
+
+СҰРАҚ:
+${query}
+
+ТҮПНҰСҚА МӘТІН:
+${chunkText}
+`;
+
+  try {
+    const res = await generateContentFixed({
+      model: GEMINI_GENERATION_MODEL, // Using the fast model
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      config: {
+        maxOutputTokens: 1024,
+        temperature: 0.1, // Very low temperature for pure extraction
+      }
+    });
+
+    console.log("VERTEX RAW RESP:", JSON.stringify(res, null, 2));
+
+    let extracted = res.text?.trim() || "";
+    if (extracted.length > 5) {
+      return extracted;
+    }
+  } catch (e) {
+    console.error("[⚠️] Error extracting exact quote:", e);
+  }
+
+  // Fallback to the original chunk if extraction fails
+  return chunkText;
+}

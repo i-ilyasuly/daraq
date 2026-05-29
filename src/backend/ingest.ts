@@ -11,6 +11,7 @@ const BUCKET_NAME = process.env.GCS_BUCKET_NAME || 'daraq-processed-images';
 
 import { tokenizeAndHash } from './rag/textUtils';
 import * as pdfjsLib from 'pdfjs-dist/legacy/build/pdf.mjs';
+// @ts-ignore
 import { createCanvas } from 'canvas';
 // pdfjsLib.GlobalWorkerOptions.workerSrc = 'node_modules/pdfjs-dist/legacy/build/pdf.worker.mjs';
 
@@ -57,8 +58,6 @@ function splitIntoChunks(text: string, wordsPerChunk = 300) {
   return chunks;
 }
 
-import { extractCoordinatesFromImage, saveCoordinatesToGCS } from './rag/visionHighlight';
-
 /**
  * 5. PDF бетін суретке айналдырып, Google Cloud Storage-ге жүктеу.
  */
@@ -73,24 +72,12 @@ async function uploadPageImageToGCS(pdfPath: string, pageNumber: number, bookNam
     const fileName = `${safeBookName}/page_${pageNumber}.png`;
     const gcsFile = bucket.file(fileName);
     
-    // Егер шынайы сурет Buffer берілсе, соны салып, Vision API қолданамыз
+    // Егер шынайы сурет Buffer берілсе, соны салып, GCS-ке жүктейміз
     if (imageBuffer) {
       await gcsFile.save(imageBuffer, {
         resumable: false,
         metadata: { contentType: "image/png" }
       });
-      // Vision API арқылы сөз координаттарын алу
-      try {
-        const words = await extractCoordinatesFromImage(imageBuffer);
-        if (words.length > 0) {
-          await saveCoordinatesToGCS(bookName, pageNumber, words);
-          console.log(`[🎯] ${bookName} - ${pageNumber}-бет үшін координаттар сақталды (${words.length} сөз).`);
-        } else {
-          console.log(`[⚠️] ${bookName} - ${pageNumber}-беттен сөз табылмады.`);
-        }
-      } catch (visionErr) {
-        console.error(`[🚨] Vision API қатесі ${pageNumber}-бет үшін:`, visionErr);
-      }
     } else {
       await gcsFile.save("dummy-image-content", {
         resumable: false,

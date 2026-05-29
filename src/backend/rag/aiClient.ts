@@ -117,7 +117,14 @@ function checkDepleted(err: any): boolean {
     errorStr.includes("resource_exhausted") ||
     errorStr.includes("billing") ||
     errorStr.includes("quota") ||
-    errorStr.includes("429")
+    errorStr.includes("429") ||
+    errorStr.includes("403") ||
+    errorStr.includes("404") ||
+    errorStr.includes("forbidden") ||
+    errorStr.includes("permission_denied") ||
+    errorStr.includes("access_denied") ||
+    errorStr.includes("denied access") ||
+    errorStr.includes("not found")
   );
 }
 
@@ -170,8 +177,10 @@ aiStudio.models.generateContent = async function(args: any) {
     }
     const errorStr = String(err?.message || err).toLowerCase();
     
-    // Only log if we did not already bypass
-    console.warn(`[⚠️] AI Studio Generation error with model ${initialModel}:`, errorStr);
+    // Only log if we didn't expect it to fail (403/404) and if it's not handled
+    if (!checkDepleted(err)) {
+      console.warn(`[⚠️] AI Studio Generation error with model ${initialModel}:`, errorStr);
+    }
 
     // If thinking config is not supported, strip and retry on AI Studio first
     if (!isAiStudioDepleted && (errorStr.includes('thinking_level') || errorStr.includes('thinkingconfig') || errorStr.includes('thinking_level is not supported'))) {
@@ -276,7 +285,9 @@ aiStudio.models.generateContentStream = async function(args: any) {
       isAiStudioDepleted = true;
     }
     const errorStr = String(err?.message || err).toLowerCase();
-    console.warn(`[⚠️] AI Studio Generation stream error with model ${initialModel}:`, errorStr);
+    if (!checkDepleted(err)) {
+      console.warn(`[⚠️] AI Studio Generation stream error with model ${initialModel}:`, errorStr);
+    }
 
     // If thinking config is not supported, strip and retry on AI Studio first
     if (!isAiStudioDepleted && (errorStr.includes('thinking_level') || errorStr.includes('thinkingconfig') || errorStr.includes('thinking_level is not supported'))) {
@@ -400,8 +411,10 @@ aiStudio.models.embedContent = async function(args: any) {
     }
     const errorStr = String(err?.message || err).toLowerCase();
     
-    // Only log if we did not already bypass
-    console.warn(`[⚠️] AI Studio Embedding error with model ${initialModel}:`, errorStr);
+    // Only log if we didn't expect it to fail (403/404) and if it's not handled
+    if (!checkDepleted(err)) {
+      console.warn(`[⚠️] AI Studio Embedding error with model ${initialModel}:`, errorStr);
+    }
 
     // Stage 2: Try Vertex AI with same model
     if (vertexAi) {

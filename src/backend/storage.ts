@@ -65,8 +65,15 @@ function cleanPrivateKey(key: string): string {
   }
 }
 
-// Initialize Google Cloud Storage
-export function initStorage() {
+interface GcpCreds {
+  projectId: string;
+  credentials: {
+    client_email: string;
+    private_key: string;
+  };
+}
+
+export function getGcpCredentials(): GcpCreds | null {
   let projectId;
   let credentials;
 
@@ -90,7 +97,6 @@ export function initStorage() {
     const rawPrivateKey = process.env.FIREBASE_PRIVATE_KEY;
 
     if (!projectId || !clientEmail || !rawPrivateKey) {
-      console.warn('GCP credentials not provided. Google Cloud Storage will not be initialized.');
       return null;
     }
     
@@ -102,10 +108,21 @@ export function initStorage() {
     };
   }
 
+  return { projectId, credentials };
+}
+
+// Initialize Google Cloud Storage
+export function initStorage() {
+  const gcpCreds = getGcpCredentials();
+  if (!gcpCreds) {
+    console.warn('GCP credentials not provided. Google Cloud Storage will not be initialized.');
+    return null;
+  }
+
   try {
     const storage = new Storage({
-      projectId,
-      credentials,
+      projectId: gcpCreds.projectId,
+      credentials: gcpCreds.credentials,
     });
 
     console.log('Google Cloud Storage initialized.');

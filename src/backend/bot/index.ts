@@ -4,10 +4,10 @@ import sharp from 'sharp';
 import { Storage } from '@google-cloud/storage';
 import { storage as customStorage } from '../storage';
 import { searchAnswers } from '../rag/searchService';
-import { generateAgentAnswerStream } from '../rag/aiService';
+import { generateAgentAnswerStream, findExactQuoteForHighlight } from '../rag/aiService';
 import { ai } from '../rag/aiClient';
 import { db } from '../db/firestore';
-import { getCoordinatesFromGCS, highlightImage } from '../rag/visionHighlight';
+import { extractCoordinatesFromImage, highlightImage } from '../rag/visionHighlight';
 
 const storage = customStorage || new Storage();
 // Fallback for dev: if you don't set it, it'll try this name
@@ -19,6 +19,7 @@ interface SourceInfo {
   pages?: number[];
   imageUrl: string;
   targetText?: string;
+  query?: string;
 }
 
 // ... original cache map
@@ -88,12 +89,13 @@ interface PaginationState {
   quranSources: any[];
   bookSources: any[];
   quranPageIndex: number;
+  query?: string;
 }
 
 const paginationCache = new Map<string, PaginationState>();
 const renamedTopicsCache = new Set<string>();
 
-export function processAndDeduplicateSources(rawSources: any[]): { quranSources: any[]; bookSources: any[] } {
+export function processAndDeduplicateSources(rawSources: any[], answerText?: string): { quranSources: any[]; bookSources: any[] } {
   if (!rawSources || rawSources.length === 0) {
     return { quranSources: [], bookSources: [] };
   }
@@ -128,22 +130,41 @@ export function processAndDeduplicateSources(rawSources: any[]): { quranSources:
       const key = `${src.book}_${chunkPages.join('_')}`;
       if (!seenBook.has(key)) {
         seenBook.add(key);
+        
         bookSources.push({
           book: src.book,
           page: chunkPages[0] || 1,
           pages: chunkPages,
           imageUrl: src.imageUrl || "",
-          text: src.text || ""
+          text: src.text || "",
+          score: src.score || 0
         });
       }
     }
   }
 
+  // Sort book sources by score descending to keep top scores first
+  bookSources.sort((a, b) => (b.score || 0) - (a.score || 0));
+
   return { quranSources, bookSources };
 }
 
-export function buildKeyboard(quranSources: any[], bookSources: any[], quranPageIndex: number, pagId: string): any {
+export function buildKeyboard(quranSources: any[], bookSources: any[], quranPageIndex: number, pagId: string, query?: string): any {
   const buttons: any[][] = [];
+
+  // Sort and identify the Top-2 highest scoring book chunks
+  const sortedBookSources = [...(bookSources || [])].sort((a, b) => (b.score || 0) - (a.score || 0));
+  const top2Chunks = sortedBookSources.slice(0, 2);
+
+  // Helper to retrieve target text only if the page/book matches Top-2 highest relevance chunks
+  const getHighlightText = (book: string, page: number): string => {
+    const matchedChunk = top2Chunks.find(chunk => {
+      const sameBook = chunk.book === book;
+      const pagesList = chunk.pages && Array.isArray(chunk.pages) ? chunk.pages.map(Number) : [chunk.page || 1];
+      return sameBook && pagesList.includes(page);
+    });
+    return matchedChunk ? (matchedChunk.text || "") : "";
+  };
 
   // 1. Дәлел суреттері (діни кітап беттері) – әрқашан міндетті түрде жоғарыда
   if (bookSources && bookSources.length > 0) {
@@ -170,7 +191,8 @@ export function buildKeyboard(quranSources: any[], bookSources: any[], quranPage
               page: src.page,
               pages: pages,
               imageUrl: src.imageUrl || "",
-              targetText: src.text || ""
+              targetText: getHighlightText(src.book, src.page),
+              query: query
             });
           }
           
@@ -183,7 +205,8 @@ export function buildKeyboard(quranSources: any[], bookSources: any[], quranPage
             book: src.book,
             page: p,
             imageUrl: src.imageUrl || "",
-            targetText: src.text || ""
+            targetText: getHighlightText(src.book, p),
+            query: query
           }));
           setGroupInfo(groupId, sourcesList);
 
@@ -193,10 +216,10 @@ export function buildKeyboard(quranSources: any[], bookSources: any[], quranPage
       }
     } else {
       // Multiple chunks! Let's collect all unique book/page combinations across all chunks
-      const allPages: { book: string; page: number; imageUrl: string; targetText?: string }[] = [];
+      const allPages: { book: string; page: number; imageUrl: string; targetText?: string; query?: string }[] = [];
       const seen = new Set<string>();
       
-      for (const src of bookSources) {
+      for (const src of sortedBookSources) {
         const pages = src.pages && Array.isArray(src.pages) ? src.pages : [src.page || 1];
         for (const p of pages) {
           const key = `${src.book}_${p}`;
@@ -206,7 +229,8 @@ export function buildKeyboard(quranSources: any[], bookSources: any[], quranPage
               book: src.book,
               page: p,
               imageUrl: src.imageUrl || "",
-              targetText: src.text || ""
+              targetText: getHighlightText(src.book, p),
+              query: query
             });
           }
         }
@@ -230,7 +254,8 @@ export function buildKeyboard(quranSources: any[], bookSources: any[], quranPage
             page: item.page,
             pages: [item.page],
             imageUrl: item.imageUrl || "",
-            targetText: item.targetText || ""
+            targetText: item.targetText || "",
+            query: query
           });
         }
         buttons.push([Markup.button.callback(btnLabel, `view_source_${sourceId}`)]);
@@ -387,12 +412,18 @@ async function addWatermark(imageUrl: string, bookName: string, pageNumber: numb
   if (!useFallbackWatermark) {
     if (targetText) {
       try {
-        const words = await getCoordinatesFromGCS(bookName, pageNumber);
+        console.log(`[🚀 ON-THE-FLY OCR] Running core Document Text Detection for ${bookName}, page ${pageNumber}...`);
+        // ON-THE-FLY DYNAMIC OCR
+        const words = await extractCoordinatesFromImage(baseImageBuffer);
         if (words && words.length > 0) {
+           console.log(`[🎯 ON-THE-FLY ALIGNMENT] Detected ${words.length} words. Highlighting match blocks...`);
            baseImageBuffer = await highlightImage(baseImageBuffer, words, targetText);
+        } else {
+           console.warn(`[⚠️ ON-THE-FLY OCR] Vision API detected no words on page ${pageNumber} of ${bookName}.`);
         }
       } catch (e) {
-        console.warn("[⚠️] Highlighting failed, skipping:", e);
+        // Fallback: Егер Vision API қате берсе, бот құламайды, тек маркерсіз су белгісі бар таза суретті жібереді
+        console.error(`[🚨 Fallback] On-the-fly OCR or Highlighting failed for ${bookName}, page ${pageNumber}. Sending clean photo with watermark:`, e);
       }
     }
 
@@ -772,34 +803,47 @@ export function setupBot() {
         relevantSources = filterSourcesByResponse(answerData.sources, answerData.answer);
       }
 
-      // Егер осы сұраныста дәлелдер табылса, оларды Firestore-ға кэштейміз
-      if (relevantSources && relevantSources.length > 0) {
-        if (db) {
-          db.collection('users').doc(chatId).collection('topics').doc(threadStr).collection('latestSources').doc('current').set({
-            sources: relevantSources,
-            updatedAt: new Date()
-          }).catch(e => console.error('[⚠️] Error caching latest sources:', e));
-        }
-      } else if (isAskingForProof(query)) {
-        // Егер дәлел табылмаса, бірақ пайдаланушы сұраса немесе көрмей тұрса, бұрын табылған соңғы дәлелдерді кэштен жүктейміз
-        if (db) {
-          try {
-            const cachedDoc = await db.collection('users').doc(chatId).collection('topics').doc(threadStr).collection('latestSources').doc('current').get();
-            if (cachedDoc.exists) {
-              const cachedData = cachedDoc.data();
+      let cachedAnswerToUse = answerData.answer;
+      let originalQuery = query;
+      
+      // Егер пайдаланушы дәлел сұраса, бұрын табылған соңғы жауапты (мәтінді) оқу
+      if (isAskingForProof(query) && db) {
+        try {
+          const cachedDoc = await db.collection('users').doc(chatId).collection('topics').doc(threadStr).collection('latestSources').doc('current').get();
+          if (cachedDoc.exists) {
+            const cachedData = cachedDoc.data();
+            if (cachedData && cachedData.answer) {
+              cachedAnswerToUse = cachedData.answer; // Prioritize original factual answer for perfect highlight overlap
+            }
+            if (cachedData && cachedData.query) {
+              originalQuery = cachedData.query;
+            }
+            if (!relevantSources || relevantSources.length === 0) {
               if (cachedData && cachedData.sources && cachedData.sources.length > 0) {
                 relevantSources = cachedData.sources;
                 console.log(`[Cache] Restored ${cachedData.sources.length} sources from Firestore for query: "${query}"`);
               }
             }
-          } catch (e) {
-            console.error('[⚠️] Error fetching cached latest sources:', e);
           }
+        } catch (e) {
+          console.error('[⚠️] Error fetching cached latest sources:', e);
+        }
+      }
+
+      // Жаңадан табылған дәлелдерді кэштейміз (егер бұл дәлел сұрау болмаса ғана)
+      if (relevantSources && relevantSources.length > 0 && !isAskingForProof(query)) {
+        if (db) {
+          db.collection('users').doc(chatId).collection('topics').doc(threadStr).collection('latestSources').doc('current').set({
+            sources: relevantSources,
+            answer: answerData.answer,
+            query: query,
+            updatedAt: new Date()
+          }).catch(e => console.error('[⚠️] Error caching latest sources:', e));
         }
       }
 
       if (relevantSources && relevantSources.length > 0) {
-        const processed = processAndDeduplicateSources(relevantSources);
+        const processed = processAndDeduplicateSources(relevantSources, cachedAnswerToUse);
         quranSources = processed.quranSources;
         bookSources = processed.bookSources;
         if (quranSources.length > 0 || bookSources.length > 0) {
@@ -807,9 +851,10 @@ export function setupBot() {
           paginationCache.set(pagId, {
             quranSources,
             bookSources,
-            quranPageIndex: 0
+            quranPageIndex: 0,
+            query: originalQuery
           });
-          inlineKeyboard = buildKeyboard(quranSources, bookSources, 0, pagId);
+          inlineKeyboard = buildKeyboard(quranSources, bookSources, 0, pagId, originalQuery);
         }
       }
 
@@ -976,16 +1021,60 @@ export function setupBot() {
         return;
       }
 
-      await ctx.answerCbQuery('Сурет жүктелуде...');
+      await ctx.answerCbQuery('Суреттер дайындалуда...');
 
-      // Су белгісін қою (Watermark)
-      const imageBuffer = await addWatermark(sourceInfo.imageUrl, sourceInfo.book, sourceInfo.page, sourceInfo.targetText);
+      let finalTargetText = sourceInfo.targetText || "";
+      if (sourceInfo.query && finalTargetText && finalTargetText.length > 50) {
+        finalTargetText = await findExactQuoteForHighlight(sourceInfo.query, finalTargetText);
+      }
 
-      // Пайдаланушыға суретті жіберу
-      await ctx.replyWithPhoto({ source: imageBuffer }, { caption: `📖 ${sourceInfo.book}, ${sourceInfo.page}-бет` });
+      // Кросс-бет (Cross-Page) мәселесін анықтау
+      const pageList = sourceInfo.pages && sourceInfo.pages.length > 0 
+        ? sourceInfo.pages 
+        : [sourceInfo.page];
+
+      if (pageList.length <= 1) {
+        // Бір ғана бет болса, әдеттегідей жалғыз сурет ретінде жібереміз
+        const imageBuffer = await addWatermark(sourceInfo.imageUrl, sourceInfo.book, pageList[0], finalTargetText);
+        await ctx.replyWithPhoto({ source: imageBuffer }, { caption: `📖 ${sourceInfo.book}, ${pageList[0]}-бет` });
+      } else {
+        // Екі немесе одан да көп бет болса (Cross-Page), оларды альбом (MediaGroup) ретінде жібереміз
+        console.log(`[📚 CROSS-PAGE] Processing ${pageList.length} pages for ${sourceInfo.book}: [${pageList.join(', ')}]`);
+        const results = await Promise.all(
+          pageList.map(async (pNum) => {
+            try {
+              // Сурет сілтемесіндегі "page_X.png"-ді тиісті бетке өзгертеміз
+              let pageUrl = sourceInfo.imageUrl || "";
+              if (pageUrl) {
+                pageUrl = pageUrl.replace(/page_\d+\.png/g, `page_${pNum}.png`);
+              }
+              const buffer = await addWatermark(pageUrl, sourceInfo.book, pNum, finalTargetText);
+              return { buffer, pageNum: pNum };
+            } catch (err) {
+              console.error(`[❌] Бетті өңдеу қатесі (${sourceInfo.book}, бет ${pNum}):`, err);
+              return null;
+            }
+          })
+        );
+
+        const validResults = results.filter((r): r is { buffer: Buffer; pageNum: number } => r !== null);
+
+        if (validResults.length === 0) {
+          await ctx.reply('Кешіріңіз, ешқандай дәлел суретін дайындау мүмкін болмады.');
+          return;
+        }
+
+        const media = validResults.map(res => ({
+          type: 'photo' as const,
+          media: { source: res.buffer },
+          caption: `📖 ${sourceInfo.book}, ${res.pageNum}-бет`
+        }));
+
+        await ctx.replyWithMediaGroup(media);
+      }
 
     } catch (error) {
-      console.error("[❌] Суретті жүктеу кезінде қате:", error);
+      console.error("[❌] Суретті жүктеу немесе альбом жасау кезінде қате:", error);
       await ctx.answerCbQuery('Суретті ашу кезінде қателік кетті.', { show_alert: true });
     }
   });
@@ -1011,7 +1100,13 @@ export function setupBot() {
             if (customUrl) {
               customUrl = customUrl.replace(/page_\d+\.png/g, `page_${src.page}.png`);
             }
-            const buffer = await addWatermark(customUrl, src.book, src.page, src.targetText);
+            
+            let finalTargetText = src.targetText || "";
+            if (src.query && finalTargetText && finalTargetText.length > 50) {
+              finalTargetText = await findExactQuoteForHighlight(src.query, finalTargetText);
+            }
+
+            const buffer = await addWatermark(customUrl, src.book, src.page, finalTargetText);
             return {
               buffer,
               book: src.book,

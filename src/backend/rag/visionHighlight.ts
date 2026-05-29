@@ -60,43 +60,6 @@ export async function extractCoordinatesFromImage(imageBuffer: Buffer): Promise<
 }
 
 /**
- * 2. Координаттарды GCS-ке жеке JSON етіп сақтау
- */
-export async function saveCoordinatesToGCS(bookName: string, pageNumber: number, words: WordPolygon[]): Promise<string> {
-  if (!storage) throw new Error("GCS қосылмаған.");
-  const bucket = storage.bucket(BUCKET_NAME);
-  const safeBookName = bookName.replace(/[^a-zA-Zа-яА-Я0-9-_]/g, '_');
-  const fileName = `${safeBookName}/page_${pageNumber}.json`;
-  
-  const gcsFile = bucket.file(fileName);
-  await gcsFile.save(JSON.stringify({ pageNumber, words }, null, 2), {
-    resumable: false,
-    metadata: { contentType: "application/json" }
-  });
-  
-  return `gs://${BUCKET_NAME}/${fileName}`;
-}
-
-/**
- * 3. GCS-тен координаттар JSON файлын оқу
- */
-export async function getCoordinatesFromGCS(bookName: string, pageNumber: number): Promise<WordPolygon[] | null> {
-  if (!storage) return null;
-  const bucket = storage.bucket(BUCKET_NAME);
-  const safeBookName = bookName.replace(/[^a-zA-Zа-яА-Я0-9-_]/g, '_');
-  const fileName = `${safeBookName}/page_${pageNumber}.json`;
-  
-  try {
-    const [content] = await bucket.file(fileName).download();
-    const data = JSON.parse(content.toString('utf-8')) as PageCoordinates;
-    return data.words;
-  } catch (err) {
-    console.warn(`[⚠️] Жоқ JSON: ${fileName}`);
-    return null;
-  }
-}
-
-/**
  * 4. Дереккөз мәтінімен сәйкестендіріп, `sharp` арқылы суретке сары маркер қосу
  */
 export async function highlightImage(imageBuffer: Buffer, words: WordPolygon[], targetText: string): Promise<Buffer> {
@@ -189,7 +152,7 @@ export async function highlightImage(imageBuffer: Buffer, words: WordPolygon[], 
   let trimmedStart = startIndex;
   let trimmedEnd = endIndex;
 
-  if (hasValidMatch && maxSoFar > 3.0) {
+  if (hasValidMatch && maxSoFar > 0.0) {
     while (trimmedStart <= trimmedEnd) {
       const word = pageWords[trimmedStart];
       if (word.cleanText && isKazakhMatch(word.cleanText, targetWords)) {
@@ -208,10 +171,14 @@ export async function highlightImage(imageBuffer: Buffer, words: WordPolygon[], 
 
   const polygonsToDraw: WordPolygon[] = [];
   // Solid match check: only highlight if evidence is strong enough (density maxSoFar > 3.0)
-  if (hasValidMatch && maxSoFar > 3.0 && trimmedStart <= trimmedEnd) {
-    // Highlight all words in the trimmed window continuously to prevent gaps/breaks
+  console.log(`[HIGHLIGHT TRACE] TargetText snippet: "${targetText.substring(0, 30)}..." - hasValidMatch: ${hasValidMatch}, maxSoFar: ${maxSoFar}, trimmedStart: ${trimmedStart}, trimmedEnd: ${trimmedEnd}`);
+  if (hasValidMatch && maxSoFar > 0.0 && trimmedStart <= trimmedEnd) {
+    // Only highlight words in the trimmed window that actually match the targetText (Rule 5)
     for (let i = trimmedStart; i <= trimmedEnd; i++) {
-      polygonsToDraw.push(pageWords[i]);
+      const word = pageWords[i];
+      if (word.cleanText && isKazakhMatch(word.cleanText, targetWords)) {
+        polygonsToDraw.push(word);
+      }
     }
   }
 
@@ -223,80 +190,173 @@ export async function highlightImage(imageBuffer: Buffer, words: WordPolygon[], 
   const width = metadata.width || 800;
   const height = metadata.height || 1200;
 
-  /**
-   * Mathematically expand word polygon vertices along text alignment direction.
-   * This provides perfect alignment and continuous look without any vertical drifts.
-   */
-  function expandPolygon(vertices: { x: number; y: number }[], padX: number, padY: number): { x: number; y: number }[] {
-    if (vertices.length !== 4) return vertices;
-    
-    const v0 = vertices[0]; // Top-Left
-    const v1 = vertices[1]; // Top-Right
-    const v2 = vertices[2]; // Bottom-Right
-    const v3 = vertices[3]; // Bottom-Left
-
-    // Top horizontal unit vector
-    const dxTop = v1.x - v0.x;
-    const dyTop = v1.y - v0.y;
-    const lenTop = Math.hypot(dxTop, dyTop) || 1;
-    const uxTop = dxTop / lenTop;
-    const uyTop = dyTop / lenTop;
-
-    // Bottom horizontal unit vector
-    const dxBot = v2.x - v3.x;
-    const dyBot = v2.y - v3.y;
-    const lenBot = Math.hypot(dxBot, dyBot) || 1;
-    const uxBot = dxBot / lenBot;
-    const uyBot = dyBot / lenBot;
-
-    // Left vertical unit vector
-    const dxLeft = v3.x - v0.x;
-    const dyLeft = v3.y - v0.y;
-    const lenLeft = Math.hypot(dxLeft, dyLeft) || 1;
-    const uxLeft = dxLeft / lenLeft;
-    const uyLeft = dyLeft / lenLeft;
-
-    // Right vertical unit vector
-    const dxRight = v2.x - v1.x;
-    const dyRight = v2.y - v1.y;
-    const lenRight = Math.hypot(dxRight, dyRight) || 1;
-    const uxRight = dxRight / lenRight;
-    const uyRight = dyRight / lenRight;
-
-    return [
-      {
-        x: v0.x - uxTop * padX - uxLeft * padY,
-        y: v0.y - uyTop * padX - uyLeft * padY
-      },
-      {
-        x: v1.x + uxTop * padX - uxRight * padY,
-        y: v1.y + uyTop * padX - uyRight * padY
-      },
-      {
-        x: v2.x + uxBot * padX + uxRight * padY,
-        y: v2.y + uyBot * padX + uyRight * padY
-      },
-      {
-        x: v3.x - uxBot * padX + uxLeft * padY,
-        y: v3.y - uyBot * padX + uyLeft * padY
-      }
-    ];
+  // Group highlighted words by horizontal lines and merge them
+  interface WordBox {
+    poly: WordPolygon;
+    left: number;
+    right: number;
+    top: number;
+    bottom: number;
+    height: number;
+    centerY: number;
   }
 
-  let svgPolygons = '';
-  // Render word polygons as beautifully contoured, continuous and slightly overlapping highlights
-  for (const poly of polygonsToDraw) {
-    if (poly.vertices && poly.vertices.length === 4) {
-      // Horizontal expand is 4.5px, vertical expand is 1.5px to achieve seamless continuous highlight line matching actual lines perfectly
-      const expanded = expandPolygon(poly.vertices, 4.5, 1.5);
-      const points = expanded.map(v => `${v.x.toFixed(1)},${v.y.toFixed(1)}`).join(' ');
-      svgPolygons += `<polygon points="${points}" fill="rgba(255, 235, 59, 0.45)" stroke="none" />\n`;
+  const wordBoxes: WordBox[] = polygonsToDraw.map(p => {
+    const xCoords = p.vertices.map(v => v.x);
+    const yCoords = p.vertices.map(v => v.y);
+    const left = Math.min(...xCoords);
+    const right = Math.max(...xCoords);
+    const top = Math.min(...yCoords);
+    const bottom = Math.max(...yCoords);
+    const h = bottom - top;
+    const centerY = (top + bottom) / 2;
+    return { poly: p, left, right, top, bottom, height: h, centerY };
+  });
+
+  // Sort word boxes by their centerY first so we process them top-to-bottom
+  wordBoxes.sort((a, b) => a.centerY - b.centerY);
+
+  const rows: WordBox[][] = [];
+  for (const wb of wordBoxes) {
+    let placed = false;
+    for (const row of rows) {
+      const rowCenter = row.reduce((sum, w) => sum + w.centerY, 0) / row.length;
+      const rowHeight = row.reduce((sum, w) => sum + w.height, 0) / row.length;
+      // If centerY is within 45% of row average height, they are on the same line
+      if (Math.abs(wb.centerY - rowCenter) < rowHeight * 0.45) {
+        row.push(wb);
+        placed = true;
+        break;
+      }
+    }
+    if (!placed) {
+      rows.push([wb]);
+    }
+  }
+
+  interface MergedRow {
+    left: number;
+    right: number;
+    top: number;
+    bottom: number;
+    height: number;
+    centerY: number;
+  }
+
+  const mergedRows: MergedRow[] = [];
+
+  for (const row of rows) {
+    if (row.length === 0) continue;
+    row.sort((a, b) => a.left - b.left);
+
+    let currentBlock = {
+      left: row[0].left,
+      right: row[0].right,
+      top: row[0].top,
+      bottom: row[0].bottom,
+    };
+
+    const avgHeight = row.reduce((sum, w) => sum + w.height, 0) / row.length;
+
+    for (let i = 1; i < row.length; i++) {
+      const hw = row[i];
+      const gap = hw.left - currentBlock.right;
+      // Merge words on the same line if their gap is within a reasonable distance
+      if (gap < avgHeight * 3.5) {
+        currentBlock.right = Math.max(currentBlock.right, hw.right);
+        currentBlock.top = Math.min(currentBlock.top, hw.top);
+        currentBlock.bottom = Math.max(currentBlock.bottom, hw.bottom);
+      } else {
+        mergedRows.push({
+          ...currentBlock,
+          height: currentBlock.bottom - currentBlock.top,
+          centerY: (currentBlock.top + currentBlock.bottom) / 2
+        });
+        currentBlock = {
+          left: hw.left,
+          right: hw.right,
+          top: hw.top,
+          bottom: hw.bottom,
+        };
+      }
+    }
+    mergedRows.push({
+      ...currentBlock,
+      height: currentBlock.bottom - currentBlock.top,
+      centerY: (currentBlock.top + currentBlock.bottom) / 2
+    });
+  }
+
+  // Sort merged rows vertically to group them into blocks (paragraphs)
+  mergedRows.sort((a, b) => a.centerY - b.centerY);
+
+  interface HighlightBlock {
+    rows: MergedRow[];
+    minX: number;
+    maxX: number;
+    minY: number;
+    maxY: number;
+  }
+
+  const hlBlocks: HighlightBlock[] = [];
+
+  for (const mRow of mergedRows) {
+    let placedInBlock = false;
+    for (const b of hlBlocks) {
+      const avgRowHeight = b.rows.reduce((sum, r) => sum + r.height, 0) / b.rows.length;
+      // If the row is vertically adjacent to any block, group it there
+      if (mRow.top - b.maxY < avgRowHeight * 3.0 && b.minY - mRow.bottom < avgRowHeight * 3.0) {
+        b.rows.push(mRow);
+        b.minX = Math.min(b.minX, mRow.left);
+        b.maxX = Math.max(b.maxX, mRow.right);
+        b.minY = Math.min(b.minY, mRow.top);
+        b.maxY = Math.max(b.maxY, mRow.bottom);
+        placedInBlock = true;
+        break;
+      }
+    }
+    if (!placedInBlock) {
+      hlBlocks.push({
+        rows: [mRow],
+        minX: mRow.left,
+        maxX: mRow.right,
+        minY: mRow.top,
+        maxY: mRow.bottom
+      });
+    }
+  }
+
+  let svgElements = '';
+  const padX = 8; // Beautiful extra width padding
+  const padY = 3; // Beautiful extra height padding
+
+  for (const block of hlBlocks) {
+    // 2. Indentation Alignment (тегістеу): Align the left-edge of all rows to block.minX
+    for (const r of block.rows) {
+      r.left = block.minX;
+    }
+
+    // Draw background highlights for all rows in this block using a soft translucent response-grade green
+    for (const r of block.rows) {
+      const w = r.right - r.left;
+      const h = r.bottom - r.top;
+      if (w > 0 && h > 0) {
+        svgElements += `<rect x="${r.left - padX}" y="${r.top - padY}" width="${w + 2 * padX}" height="${h + 2 * padY}" fill="rgba(52, 199, 89, 0.25)" rx="4" ry="4" stroke="none" />\n`;
+      }
+    }
+
+    // 3. Left vertical premium quote border
+    const lineX = block.minX - padX - 8;
+    const lineY = block.minY - padY;
+    const lineHeight = (block.maxY + padY) - (block.minY - padY);
+    if (lineHeight > 0) {
+      svgElements += `<rect x="${lineX}" y="${lineY}" width="5" height="${lineHeight}" fill="#34C759" rx="2.5" ry="2.5" stroke="none" />\n`;
     }
   }
 
   const svgOverlay = `
     <svg width="${width}" height="${height}">
-      ${svgPolygons}
+      ${svgElements}
     </svg>
   `;
 

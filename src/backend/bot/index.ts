@@ -1,13 +1,13 @@
+import { formatTelegramMessage, transliterateToLatin, filterSourcesByResponse, isAskingForProof } from './formatters';
 import { Telegraf, Markup } from 'telegraf';
 import { v4 as uuidv4 } from 'uuid';
 import sharp from 'sharp';
 import { Storage } from '@google-cloud/storage';
 import { storage as customStorage } from '../storage';
 import { searchAnswers } from '../rag/searchService';
-import { generateAgentAnswerStream, findExactQuoteForHighlight } from '../rag/aiService';
+import { generateAgentAnswerStream } from '../rag/aiService';
 import { ai } from '../rag/aiClient';
 import { db } from '../db/firestore';
-import { extractCoordinatesFromImage, highlightImage } from '../rag/visionHighlight';
 
 const storage = customStorage || new Storage();
 // Fallback for dev: if you don't set it, it'll try this name
@@ -94,6 +94,7 @@ interface PaginationState {
 
 const paginationCache = new Map<string, PaginationState>();
 const renamedTopicsCache = new Set<string>();
+const pendingSourcesCache = new Map<string, any>();
 
 export function processAndDeduplicateSources(rawSources: any[], answerText?: string): { quranSources: any[]; bookSources: any[] } {
   if (!rawSources || rawSources.length === 0) {
@@ -154,17 +155,6 @@ export function buildKeyboard(quranSources: any[], bookSources: any[], quranPage
 
   // Sort and identify the Top-2 highest scoring book chunks
   const sortedBookSources = [...(bookSources || [])].sort((a, b) => (b.score || 0) - (a.score || 0));
-  const top2Chunks = sortedBookSources.slice(0, 2);
-
-  // Helper to retrieve target text only if the page/book matches Top-2 highest relevance chunks
-  const getHighlightText = (book: string, page: number): string => {
-    const matchedChunk = top2Chunks.find(chunk => {
-      const sameBook = chunk.book === book;
-      const pagesList = chunk.pages && Array.isArray(chunk.pages) ? chunk.pages.map(Number) : [chunk.page || 1];
-      return sameBook && pagesList.includes(page);
-    });
-    return matchedChunk ? (matchedChunk.text || "") : "";
-  };
 
   // 1. Дәлел суреттері (діни кітап беттері) – әрқашан міндетті түрде жоғарыда
   if (bookSources && bookSources.length > 0) {
@@ -191,7 +181,6 @@ export function buildKeyboard(quranSources: any[], bookSources: any[], quranPage
               page: src.page,
               pages: pages,
               imageUrl: src.imageUrl || "",
-              targetText: getHighlightText(src.book, src.page),
               query: query
             });
           }
@@ -205,7 +194,6 @@ export function buildKeyboard(quranSources: any[], bookSources: any[], quranPage
             book: src.book,
             page: p,
             imageUrl: src.imageUrl || "",
-            targetText: getHighlightText(src.book, p),
             query: query
           }));
           setGroupInfo(groupId, sourcesList);
@@ -216,7 +204,7 @@ export function buildKeyboard(quranSources: any[], bookSources: any[], quranPage
       }
     } else {
       // Multiple chunks! Let's collect all unique book/page combinations across all chunks
-      const allPages: { book: string; page: number; imageUrl: string; targetText?: string; query?: string }[] = [];
+      const allPages: { book: string; page: number; imageUrl: string; query?: string }[] = [];
       const seen = new Set<string>();
       
       for (const src of sortedBookSources) {
@@ -229,7 +217,6 @@ export function buildKeyboard(quranSources: any[], bookSources: any[], quranPage
               book: src.book,
               page: p,
               imageUrl: src.imageUrl || "",
-              targetText: getHighlightText(src.book, p),
               query: query
             });
           }
@@ -254,7 +241,6 @@ export function buildKeyboard(quranSources: any[], bookSources: any[], quranPage
             page: item.page,
             pages: [item.page],
             imageUrl: item.imageUrl || "",
-            targetText: item.targetText || "",
             query: query
           });
         }
@@ -273,29 +259,11 @@ export function buildKeyboard(quranSources: any[], bookSources: any[], quranPage
   return Markup.inlineKeyboard(buttons);
 }
 
-/**
- * Қазақша кириллицаны латыншаға транслитерациялау функциясы
- */
-export function transliterateToLatin(text: string): string {
-  const map: { [key: string]: string } = {
-    'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd', 'е': 'e', 'ё': 'yo', 'ж': 'zh', 'з': 'z',
-    'и': 'i', 'й': 'y', 'к': 'k', 'л': 'l', 'м': 'm', 'н': 'n', 'о': 'o', 'п': 'p', 'р': 'r',
-    'с': 's', 'т': 't', 'у': 'u', 'ф': 'f', 'х': 'kh', 'ц': 'ts', 'ч': 'ch', 'ш': 'sh', 'щ': 'shch',
-    'ъ': '', 'ы': 'y', 'ь': '', 'э': 'e', 'ю': 'yu', 'я': 'ya',
-    'ә': 'ae', 'ғ': 'g', 'қ': 'q', 'ң': 'n', 'ө': 'o', 'ұ': 'u', 'ү': 'u', 'һ': 'h', 'і': 'i',
-    'А': 'A', 'Б': 'B', 'В': 'V', 'Г': 'G', 'Д': 'D', 'Е': 'E', 'Ё': 'Yo', 'Ж': 'Zh', 'З': 'Z',
-    'И': 'I', 'Й': 'Y', 'К': 'K', 'Л': 'L', 'M': 'M', 'Н': 'N', 'О': 'O', 'П': 'P', 'Р': 'R',
-    'С': 'S', 'Т': 'T', 'У': 'U', 'Ф': 'F', 'Х': 'Kh', 'Ц': 'Ts', 'Ч': 'Ch', 'Ш': 'Sh', 'Щ': 'Shch',
-    'Ы': 'Y', 'Э': 'E', 'Ю': 'Yu', 'Я': 'Ya',
-    'Ә': 'Ae', 'Ғ': 'G', 'Қ': 'Q', 'Ң': 'N', 'Ө': 'O', 'Ұ': 'U', 'Ү': 'U', 'Һ': 'H', 'І': 'I'
-  };
-  return text.split('').map(char => map[char] || char).join('');
-}
 
 /**
  * Сурет үстіне су белгісін (Watermark) салатын функция
  */
-async function addWatermark(imageUrl: string, bookName: string, pageNumber: number, targetText?: string): Promise<Buffer> {
+async function addWatermark(imageUrl: string, bookName: string, pageNumber: number): Promise<Buffer> {
   const watermarkText = `Daraq: ${bookName}, ${pageNumber} бет`;
   const svgText = `
     <svg width="800" height="80">
@@ -410,23 +378,6 @@ async function addWatermark(imageUrl: string, bookName: string, pageNumber: numb
 
   // Егер жарамды сурет болса, оның төменгі жағына су белгісін саламыз
   if (!useFallbackWatermark) {
-    if (targetText) {
-      try {
-        console.log(`[🚀 ON-THE-FLY OCR] Running core Document Text Detection for ${bookName}, page ${pageNumber}...`);
-        // ON-THE-FLY DYNAMIC OCR
-        const words = await extractCoordinatesFromImage(baseImageBuffer);
-        if (words && words.length > 0) {
-           console.log(`[🎯 ON-THE-FLY ALIGNMENT] Detected ${words.length} words. Highlighting match blocks...`);
-           baseImageBuffer = await highlightImage(baseImageBuffer, words, targetText);
-        } else {
-           console.warn(`[⚠️ ON-THE-FLY OCR] Vision API detected no words on page ${pageNumber} of ${bookName}.`);
-        }
-      } catch (e) {
-        // Fallback: Егер Vision API қате берсе, бот құламайды, тек маркерсіз су белгісі бар таза суретті жібереді
-        console.error(`[🚨 Fallback] On-the-fly OCR or Highlighting failed for ${bookName}, page ${pageNumber}. Sending clean photo with watermark:`, e);
-      }
-    }
-
     return await sharp(baseImageBuffer)
       .composite([
         {
@@ -440,217 +391,6 @@ async function addWatermark(imageUrl: string, bookName: string, pageNumber: numb
     return baseImageBuffer;
   }
 }
-
-// Қазақша сүрелер картасы (Quran.com ID-леріне сәйкес)
-const KAZ_SURAHS: { [key: string]: number } = {
-  'бақара': 2, 'әли имран': 3, 'әли-имран': 3, 'ниса': 4, 'мәида': 5, 'анғам': 6, 'әнғам': 6, 'ағраф': 7, 'әнфал': 8, 'тәубе': 9, 'юнус': 10,
-  'һұд': 11, 'юсуф': 12, 'рағд': 13, 'ибраһим': 14, 'хижр': 15, 'нахл': 16, 'исра': 17, 'кәһф': 18, 'мәриям': 19, 'таһа': 20,
-  'әнбия': 21, 'хаж': 22, 'муминун': 23, 'нұр': 24, 'фурқан': 25, 'шуара': 26, 'нәмл': 27, 'қасас': 28, 'анкабут': 29, 'әнкабут': 29,
-  'рум': 30, 'лұқман': 31, 'сәжде': 32, 'ахзаб': 33, 'сәбә': 34, 'фатыр': 35, 'ясин': 36, 'саффат': 37, 'саад': 38, 'зумар': 39,
-  'ғафир': 40, 'фуссилат': 41, 'шура': 42, 'зухруф': 43, 'духан': 44, 'жәсия': 45, 'ахқаф': 46, 'мұхаммед': 47, 'фатх': 48,
-  'хужурат': 49, 'қаф': 50, 'зәрият': 51, 'тур': 52, 'нәжм': 53, 'қамар': 54, 'рахман': 55, 'уақиға': 56, 'хадид': 57, 'мужәдәлә': 58,
-  'хашр': 59, 'мумтахина': 60, 'саф': 61, 'жұма': 62, 'мунафиқун': 63, 'тағабун': 64, 'талақ': 65, 'тахрим': 66, 'мүлік': 67, 'мулк': 67,
-  'қалам': 68, 'хаққа': 69, 'мағариж': 70, 'нұх': 71, 'жын': 72, 'муззаммил': 73, 'муддәссир': 74, 'қиямет': 75, 'инсан': 76, 'мүрсәләт': 77, 'нәбә': 78,
-  'назиғат': 79, 'ғабит': 80, 'тәкуир': 81, 'инфитар': 82, 'мутаффифин': 83, 'иншиқақ': 84, 'буруж': 85, 'тариқ': 86, 'ала': 87,
-  'ғашия': 88, 'фәжр': 89, 'бәләд': 90, 'шәмс': 91, 'ләйл': 92, 'духа': 93, 'инширах': 94, 'шарх': 94, 'тин': 95,
-  'алақ': 96, 'қадр': 97, 'бәййінә': 98, 'зілзәлә': 99, 'адият': 100, 'қариға': 101, 'тәкәсүр': 102, 'аср': 103, 'һумаза': 104,
-  'фил': 105, 'құрайыш': 106, 'мағун': 107, 'кәусар': 108, 'кәфирун': 109, 'наср': 110, 'мәсәд': 111, 'ықылас': 112, 'фәләқ': 113, 'нас': 114
-};
-
-/**
- * Telegram қабылдамайтын <br> және <p> сияқты тегтерді кәдімгі жол ауыстыруға алмастыру,
- * және қажет болған жағдайда жұлдызшалы Markdown-ды HTML форматына келтіру.
- */
-export function formatTelegramMessage(text: string, quranSources: any[] = []): string {
-  let formatted = text;
-  formatted = formatted.replace(/<br\s*\/?>/gi, '\n');
-  formatted = formatted.replace(/<\/p>/gi, '\n\n').replace(/<p>/gi, '');
-  
-  // Тізімдердегі * белгілерін • белгісіне ауыстыру (Жаңа жолдан басталған немесе бос орын алдындағы)
-  formatted = formatted.replace(/^(\s*)\*\s/gm, '$1• ');
-
-  formatted = formatted.replace(/\*\*(.*?)\*\*/g, '<b>$1</b>'); // **bold** -> <b>bold</b> (Fallback)
-  formatted = formatted.replace(/(?<!<)\*(?!>)(.*?)\*(?![^<]*>)/g, '<i>$1</i>'); // *italic*
-
-  // Үлкен бос орындарды болдырмау үшін 3 немесе одан көп қатар келген бос жолдарды бір бос жолға азайтамыз (ең көп дегенде 2 жаңа жол)
-  formatted = formatted.replace(/(?:\r?\n\s*){3,}/g, '\n\n');
-
-  // 1. Құран аяттарының нақты сілтемелерін (quranSources берілген болса) мәтін ішінде көк сілтемемен алмастыру
-  if (quranSources && quranSources.length > 0) {
-    for (const src of quranSources) {
-      if (!src.book) continue;
-      const surahKk = src.book.replace(" сүресі", "").trim();
-      const verseNum = src.page || 1;
-      const url = src.url || 'https://quran.com';
-      
-      const escapedSurah = surahKk.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
-      // Match: "Бақара сүресінің 184-аятында", "Бақара сүресі, 184-аят", "Бақара 184-аят", etc.
-      const pattern = new RegExp(`(${escapedSurah}\\s+(?:сүресі(?:нің|нде|дегі)?,?\\s+)?${verseNum}(?:\\s*-\\s*аят(?:ында|ы|қа|пен)?)?)`, 'gi');
-      
-      formatted = formatted.replace(pattern, (match, p1, offset, fullStr) => {
-        // HTML сілтемесінің ішінде өзін тағы ауыстыруды болдырмау үшін:
-        const before = fullStr.substring(0, offset);
-        const openCount = (before.match(/<a\s/g) || []).length;
-        const closeCount = (before.match(/<\/a>/g) || []).length;
-        if (openCount > closeCount) {
-          return match;
-        }
-        return `<a href="${url}">${match}</a>`;
-      });
-    }
-  }
-
-  // 2. Мәтін ішіндегі кез келген Құран аяттарына сілтемелерді автоматты түрде тауып, Quran.com сілтемесіне айналдыру
-  const surahKeys = Object.keys(KAZ_SURAHS).sort((a, b) => b.length - a.length);
-  const escapedSurahs = surahKeys.map(k => k.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')).join('|');
-  const autoPattern = new RegExp(`(${escapedSurahs})\\s+(?:сүресі(?:нің|нде|дегі)?,?\\s+)?(\\d+)(?:\\s*-\\s*аят(?:ында|ы|қа|пен|қарлық|тар|қа)?\\b)?`, 'gi');
-
-  formatted = formatted.replace(autoPattern, (match, surahName, verseStr, offset, fullStr) => {
-    // Егер бұл сөз тіркесі бұрыннан <a> сілтемесінің ішінде немесе оған таяу тұрса, өзгертпейміз:
-    const before = fullStr.substring(0, offset);
-    const openCount = (before.match(/<a\s/g) || []).length;
-    const closeCount = (before.match(/<\/a>/g) || []).length;
-    if (openCount > closeCount) {
-      return match;
-    }
-
-    const surahId = KAZ_SURAHS[surahName.toLowerCase().trim()];
-    if (surahId) {
-      const url = `https://quran.com/${surahId}/${verseStr}`;
-      return `<a href="${url}">${match}</a>`;
-    }
-    return match;
-  });
-
-  return formatted.trim();
-}
-
-/**
- * Біз жауаптағы сөздер мен әрбір дереккөздегі мәтін сәйкестігін бағалаймыз.
- * Бұл арқылы ең сәйкес келетін нақты парақты/дәлелді анықтаймыз.
- */
-function chooseBestSource(answer: string, sources: any[]): any {
-  if (!sources || sources.length === 0) return null;
-  if (sources.length === 1) return sources[0];
-
-  const cleanText = (t: string) => t.toLowerCase().replace(/[^a-zA-Zа-яА-Яәғқңөұүһі]/g, ' ');
-  const answerWords = cleanText(answer)
-    .split(/\s+/)
-    .filter(w => w.length > 3);
-
-  if (answerWords.length === 0) {
-    return sources[0];
-  }
-
-  let bestSource = sources[0];
-  let maxScore = -1;
-
-  for (const src of sources) {
-    const srcText = cleanText(src.text);
-    let intersectionCount = 0;
-    
-    const uniqueAnswerWords = Array.from(new Set(answerWords));
-    for (const word of uniqueAnswerWords) {
-      if (srcText.includes(word)) {
-        intersectionCount++;
-      }
-    }
-
-    const ratio = intersectionCount / uniqueAnswerWords.length;
-    const combinedScore = ratio * 0.7 + (src.score || 0) * 0.3;
-    
-    if (combinedScore > maxScore) {
-      maxScore = combinedScore;
-      bestSource = src;
-    }
-  }
-
-  return bestSource;
-}
-
-/**
- * Жауап мәтінінен модель тікелей сілтеме жасаған кітаптар мен беттерді іздейді.
- * Тек сол нақты беттерді ғана сүзгілеп алып қалады.
- * Егер сәйкестік табылмаса, ең жақсы сәйкестікті (chooseBestSource) балама ретінде қайтарады.
- */
-export function filterSourcesByResponse(sources: any[], answer: string): any[] {
-  if (!sources || sources.length === 0) return [];
-
-  const filtered: any[] = [];
-  const lowercaseAnswer = answer.toLowerCase();
-  
-  // 1. Құран дереккөздері үшін сүзгілеу:
-  const quranSources = sources.filter(src => src.isQuran || (src.book && src.book.endsWith('сүресі')));
-  const bookSources = sources.filter(src => !src.isQuran && !(src.book && src.book.endsWith('сүресі')));
-  
-  for (const src of quranSources) {
-    const surahName = src.book.replace(" сүресі", "").trim().toLowerCase();
-    const verseNum = src.page || 1;
-    if (lowercaseAnswer.includes(surahName) && answer.includes(String(verseNum))) {
-      filtered.push(src);
-    }
-  }
-
-  // 2. Кітаптар үшін сүзгілеу:
-  const references: { book: string; page: number }[] = [];
-  const regex = /«([^»]+)»[^\d]*(\d+)/g;
-  let match;
-  while ((match = regex.exec(answer)) !== null) {
-    const bookName = match[1].trim().toLowerCase();
-    const pageNum = parseInt(match[2], 10);
-    references.push({ book: bookName, page: pageNum });
-  }
-
-  const matchedBooks: any[] = [];
-  if (references.length > 0) {
-    for (const src of bookSources) {
-      const srcBook = (src.book || '').toLowerCase().trim();
-      const srcPages = src.pages && Array.isArray(src.pages) ? src.pages.map(Number) : [src.page || 1];
-      
-      const matched = references.some(ref => {
-        const bookMatches = srcBook.includes(ref.book) || ref.book.includes(srcBook);
-        const pageMatches = srcPages.includes(ref.page);
-        return bookMatches && pageMatches;
-      });
-      
-      if (matched) {
-        matchedBooks.push(src);
-      }
-    }
-  }
-
-  if (matchedBooks.length > 0) {
-    filtered.push(...matchedBooks);
-  } else if (bookSources.length > 0) {
-    // Егер нақты сілтеме табылмаса, ең үздік жалғыз кітап дереккөзін ғана таңдаймыз
-    const bestBook = chooseBestSource(answer, bookSources);
-    if (bestBook) {
-      filtered.push(bestBook);
-    }
-  }
-
-  // Егер жалпы ештеңе өтпесе, fallback ретінде ең жақсы жалғыз деректі аламыз
-  if (filtered.length === 0 && sources.length > 0) {
-    const bestGlobal = chooseBestSource(answer, sources);
-    if (bestGlobal) {
-      filtered.push(bestGlobal);
-    }
-  }
-
-  return filtered;
-}
-
-
-export function isAskingForProof(query: string): boolean {
-  const clean = query.toLowerCase();
-  const keywords = [
-    'дәлел', 'далел', 'сурет', 'көрсет', 'көрсете', 'кітап', 'аят', 
-    'көрмей', 'көрмедім', 'көрінбейді', 'көрінбей', 'таппадым', 'қайда', 
-    'сілтеме', 'көз', 'дерек', 'кітаптан', 'фото', 'скриншот'
-  ];
-  return keywords.some(kw => clean.includes(kw));
-}
-
 
 export function setupBot() {
   const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -713,7 +453,7 @@ export function setupBot() {
     if (!query) return;
 
     let isFirstTopicMessage = false;
-    const cacheKey = `${chatId}_${targetThreadId || 'general'}`;
+    const topicCacheKey = `${chatId}_${targetThreadId || 'general'}`;
     const draftId = ctx.message.message_id; // Using user message_id as draft identifier!
 
     try {
@@ -743,18 +483,18 @@ export function setupBot() {
       }
 
       if (targetThreadId && db) {
-        if (!renamedTopicsCache.has(cacheKey)) {
+        if (!renamedTopicsCache.has(topicCacheKey)) {
           const topicDoc = await db.collection('users').doc(chatId).collection('topics').doc(String(targetThreadId)).get();
           if (topicDoc.exists && topicDoc.data()?.renamed) {
-            renamedTopicsCache.add(cacheKey);
+            renamedTopicsCache.add(topicCacheKey);
           } else {
             const topicMessages = await db.collection('users').doc(chatId).collection('topics').doc(String(targetThreadId)).collection('messages').limit(1).get();
             const hasPriorMessages = !topicMessages.empty;
             if (hasPriorMessages) {
-              renamedTopicsCache.add(cacheKey);
+              renamedTopicsCache.add(topicCacheKey);
             } else {
               isFirstTopicMessage = true;
-              renamedTopicsCache.add(cacheKey);
+              renamedTopicsCache.add(topicCacheKey);
             }
           }
         }
@@ -765,6 +505,8 @@ export function setupBot() {
       let quranSources: any[] = [];
       let bookSources: any[] = [];
       let inlineKeyboard: any = null;
+
+      const lang = ctx.from?.language_code;
 
       const answerData = await generateAgentAnswerStream(
         chatId,
@@ -792,7 +534,8 @@ export function setupBot() {
             });
           } catch (e) {}
         },
-        targetThreadId
+        targetThreadId,
+        lang
       );
 
       isAgentThinking = false;
@@ -805,41 +548,34 @@ export function setupBot() {
 
       let cachedAnswerToUse = answerData.answer;
       let originalQuery = query;
+      const cacheKey = `${chatId}_${threadStr}`;
       
       // Егер пайдаланушы дәлел сұраса, бұрын табылған соңғы жауапты (мәтінді) оқу
-      if (isAskingForProof(query) && db) {
-        try {
-          const cachedDoc = await db.collection('users').doc(chatId).collection('topics').doc(threadStr).collection('latestSources').doc('current').get();
-          if (cachedDoc.exists) {
-            const cachedData = cachedDoc.data();
-            if (cachedData && cachedData.answer) {
-              cachedAnswerToUse = cachedData.answer; // Prioritize original factual answer for perfect highlight overlap
-            }
-            if (cachedData && cachedData.query) {
-              originalQuery = cachedData.query;
-            }
-            if (!relevantSources || relevantSources.length === 0) {
-              if (cachedData && cachedData.sources && cachedData.sources.length > 0) {
-                relevantSources = cachedData.sources;
-                console.log(`[Cache] Restored ${cachedData.sources.length} sources from Firestore for query: "${query}"`);
-              }
+      if (isAskingForProof(query)) {
+        const cachedData = pendingSourcesCache.get(cacheKey);
+        if (cachedData) {
+          if (cachedData.answer) {
+            cachedAnswerToUse = cachedData.answer; // Prioritize original factual answer for perfect highlight overlap
+          }
+          if (cachedData.query) {
+            originalQuery = cachedData.query;
+          }
+          if (!relevantSources || relevantSources.length === 0) {
+            if (cachedData.sources && cachedData.sources.length > 0) {
+              relevantSources = cachedData.sources;
+              console.log(`[Cache] Restored ${cachedData.sources.length} sources from memory for query: "${query}"`);
             }
           }
-        } catch (e) {
-          console.error('[⚠️] Error fetching cached latest sources:', e);
         }
-      }
-
-      // Жаңадан табылған дәлелдерді кэштейміз (егер бұл дәлел сұрау болмаса ғана)
-      if (relevantSources && relevantSources.length > 0 && !isAskingForProof(query)) {
-        if (db) {
-          db.collection('users').doc(chatId).collection('topics').doc(threadStr).collection('latestSources').doc('current').set({
-            sources: relevantSources,
-            answer: answerData.answer,
-            query: query,
-            updatedAt: new Date()
-          }).catch(e => console.error('[⚠️] Error caching latest sources:', e));
-        }
+      } else {
+        // Жаңадан табылған дәлелдерді кэштейміз (егер бұл дәлел сұрау болмаса ғана)
+        // ТІПТІ relevantSources бос болса да (LLM кітап атын атамаса да), RAG берген барлық source-тарды сақтап қоямыз
+        const sourcesToCache = (relevantSources && relevantSources.length > 0) ? relevantSources : (answerData.sources || []);
+        pendingSourcesCache.set(cacheKey, {
+          sources: sourcesToCache,
+          answer: answerData.answer,
+          query: query
+        });
       }
 
       if (relevantSources && relevantSources.length > 0) {
@@ -885,6 +621,19 @@ export function setupBot() {
 
       if (inlineKeyboard) {
         Object.assign(extraOptions, inlineKeyboard);
+      }
+
+      // 7. Message Effects (Мерекелік Хабарлама Эффектілері — API 7.3+)
+      const lf = finalMessage.toLowerCase();
+      if (
+         lf.includes('мүбәрак') || 
+         lf.includes('мубарак') || 
+         lf.includes('айт қабыл болсын') || 
+         lf.includes('айт кабыл болсын') ||
+         lf.includes('благословенн') ||
+         lf.includes('қабыл етсін')
+      ) {
+         extraOptions.message_effect_id = "5046509860389126442"; // 🎉 Конфетти (Confetti effect)
       }
 
       // Финалдық хабарламаны жібереміз
@@ -1022,20 +771,31 @@ export function setupBot() {
       }
 
       await ctx.answerCbQuery('Суреттер дайындалуда...');
+      
+      const chatId = String(ctx.chat?.id || '');
+      const targetThreadId = (ctx.callbackQuery?.message as any)?.message_thread_id;
+      
+      let isWorking = true;
+      const sendPhotoStatus = async () => {
+        try {
+          if (isWorking) {
+            await ctx.telegram.sendChatAction(chatId, 'upload_photo', targetThreadId ? { message_thread_id: targetThreadId } : undefined);
+          }
+        } catch (e) {}
+      };
+      
+      const statusInterval = setInterval(sendPhotoStatus, 4000);
+      sendPhotoStatus();
 
-      let finalTargetText = sourceInfo.targetText || "";
-      if (sourceInfo.query && finalTargetText && finalTargetText.length > 50) {
-        finalTargetText = await findExactQuoteForHighlight(sourceInfo.query, finalTargetText);
-      }
-
-      // Кросс-бет (Cross-Page) мәселесін анықтау
-      const pageList = sourceInfo.pages && sourceInfo.pages.length > 0 
-        ? sourceInfo.pages 
-        : [sourceInfo.page];
+      try {
+        // Кросс-бет (Cross-Page) мәселесін анықтау
+        const pageList = sourceInfo.pages && sourceInfo.pages.length > 0 
+          ? sourceInfo.pages 
+          : [sourceInfo.page];
 
       if (pageList.length <= 1) {
         // Бір ғана бет болса, әдеттегідей жалғыз сурет ретінде жібереміз
-        const imageBuffer = await addWatermark(sourceInfo.imageUrl, sourceInfo.book, pageList[0], finalTargetText);
+        const imageBuffer = await addWatermark(sourceInfo.imageUrl, sourceInfo.book, pageList[0]);
         await ctx.replyWithPhoto({ source: imageBuffer }, { caption: `📖 ${sourceInfo.book}, ${pageList[0]}-бет` });
       } else {
         // Екі немесе одан да көп бет болса (Cross-Page), оларды альбом (MediaGroup) ретінде жібереміз
@@ -1048,7 +808,7 @@ export function setupBot() {
               if (pageUrl) {
                 pageUrl = pageUrl.replace(/page_\d+\.png/g, `page_${pNum}.png`);
               }
-              const buffer = await addWatermark(pageUrl, sourceInfo.book, pNum, finalTargetText);
+              const buffer = await addWatermark(pageUrl, sourceInfo.book, pNum);
               return { buffer, pageNum: pNum };
             } catch (err) {
               console.error(`[❌] Бетті өңдеу қатесі (${sourceInfo.book}, бет ${pNum}):`, err);
@@ -1073,9 +833,15 @@ export function setupBot() {
         await ctx.replyWithMediaGroup(media);
       }
 
+      } catch (error) {
+        console.error("[❌] Суретті жүктеу немесе альбом жасау кезінде қате:", error);
+        await ctx.answerCbQuery('Суретті ашу кезінде қателік кетті.', { show_alert: true });
+      } finally {
+        isWorking = false;
+        clearInterval(statusInterval);
+      }
     } catch (error) {
-      console.error("[❌] Суретті жүктеу немесе альбом жасау кезінде қате:", error);
-      await ctx.answerCbQuery('Суретті ашу кезінде қателік кетті.', { show_alert: true });
+      console.error("[❌] Әрекетті өңдеу қатесі:", error);
     }
   });
 
@@ -1092,59 +858,75 @@ export function setupBot() {
 
       await ctx.answerCbQuery('Дәлел суреттері дайындалуда...');
 
-      // Суреттерге су белгісін параллельді Promise.all арқылы қосу
-      const results = await Promise.all(
-        sources.map(async (src) => {
-          try {
-            let customUrl = src.imageUrl || "";
-            if (customUrl) {
-              customUrl = customUrl.replace(/page_\d+\.png/g, `page_${src.page}.png`);
-            }
-            
-            let finalTargetText = src.targetText || "";
-            if (src.query && finalTargetText && finalTargetText.length > 50) {
-              finalTargetText = await findExactQuoteForHighlight(src.query, finalTargetText);
-            }
-
-            const buffer = await addWatermark(customUrl, src.book, src.page, finalTargetText);
-            return {
-              buffer,
-              book: src.book,
-              page: src.page
-            };
-          } catch (err) {
-            console.error(`[❌] Суретке су белгісін қосу кезіндегі қате (${src.book}, бет ${src.page}):`, err);
-            return null;
+      const chatId = String(ctx.chat?.id || '');
+      const targetThreadId = (ctx.callbackQuery?.message as any)?.message_thread_id;
+      
+      let isWorking = true;
+      const sendPhotoStatus = async () => {
+        try {
+          if (isWorking) {
+            await ctx.telegram.sendChatAction(chatId, 'upload_photo', targetThreadId ? { message_thread_id: targetThreadId } : undefined);
           }
-        })
-      );
+        } catch (e) {}
+      };
+      
+      const statusInterval = setInterval(sendPhotoStatus, 4000);
+      sendPhotoStatus();
 
-      const imageBuffers = results.filter((res): res is { buffer: Buffer; book: string; page: number } => res !== null);
-
-      if (imageBuffers.length === 0) {
-        await ctx.answerCbQuery('Кешіріңіз, ешқандай суретті жүктеу мүмкін болмады.', { show_alert: true });
-        return;
-      }
-
-      // Media Group түрінде біріктіріп жібереміз
       try {
-        const media = imageBuffers.map(img => ({
-          type: 'photo' as const,
-          media: { source: img.buffer },
-          caption: `📖 ${img.book}, ${img.page}-бет`
-        }));
-        await ctx.replyWithMediaGroup(media);
-      } catch (mediaGroupError) {
-        console.warn("[⚠️] Media Group жіберу қатесі, суреттерді жеке-жеке жібереміз:", mediaGroupError);
-        // Fallback: send sequentially if Media Group fails
-        for (const img of imageBuffers) {
-          await ctx.replyWithPhoto({ source: img.buffer }, { caption: `📖 ${img.book}, ${img.page}-бет` });
+        // Суреттерге су белгісін параллельді Promise.all арқылы қосу
+        const results = await Promise.all(
+          sources.map(async (src) => {
+            try {
+              let customUrl = src.imageUrl || "";
+              if (customUrl) {
+                customUrl = customUrl.replace(/page_\d+\.png/g, `page_${src.page}.png`);
+              }
+  
+              const buffer = await addWatermark(customUrl, src.book, src.page);
+              return {
+                buffer,
+                book: src.book,
+                page: src.page
+              };
+            } catch (err) {
+              console.error(`[❌] Суретке су белгісін қосу кезіндегі қате (${src.book}, бет ${src.page}):`, err);
+              return null;
+            }
+          })
+        );
+  
+        const imageBuffers = results.filter((res): res is { buffer: Buffer; book: string; page: number } => res !== null);
+  
+        if (imageBuffers.length === 0) {
+          await ctx.answerCbQuery('Кешіріңіз, ешқандай суретті жүктеу мүмкін болмады.', { show_alert: true });
+          return;
         }
+  
+        // Media Group түрінде біріктіріп жібереміз
+        try {
+          const media = imageBuffers.map(img => ({
+            type: 'photo' as const,
+            media: { source: img.buffer },
+            caption: `📖 ${img.book}, ${img.page}-бет`
+          }));
+          await ctx.replyWithMediaGroup(media);
+        } catch (mediaGroupError) {
+          console.warn("[⚠️] Media Group жіберу қатесі, суреттерді жеке-жеке жібереміз:", mediaGroupError);
+          // Fallback: send sequentially if Media Group fails
+          for (const img of imageBuffers) {
+            await ctx.replyWithPhoto({ source: img.buffer }, { caption: `📖 ${img.book}, ${img.page}-бет` });
+          }
+        }
+      } catch (error) {
+        console.error("[❌] Топтық суретті жүктеу немесе қате:", error);
+        await ctx.answerCbQuery('Суреттер топтамасын ашу кезінде қателік кетті.', { show_alert: true });
+      } finally {
+        isWorking = false;
+        clearInterval(statusInterval);
       }
-
     } catch (error) {
       console.error("[❌] Дәлелдер тобын жүктеу кезінде қате:", error);
-      await ctx.answerCbQuery('Суреттер топтамасын ашу кезінде қателік кетті.', { show_alert: true });
     }
   });
 

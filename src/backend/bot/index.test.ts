@@ -1,15 +1,5 @@
-import { 
-  setupBot, 
-  formatTelegramMessage, 
-  processAndDeduplicateSources, 
-  transliterateToLatin, 
-  buildKeyboard,
-  getSourceInfo,
-  setSourceInfo,
-  getGroupInfo,
-  setGroupInfo,
-  isAskingForProof
-} from './index';
+import { setupBot, processAndDeduplicateSources, buildKeyboard, getSourceInfo, setSourceInfo, getGroupInfo, setGroupInfo } from './index';
+import { formatTelegramMessage, transliterateToLatin, isAskingForProof } from './formatters';
 
 jest.mock('telegraf', () => {
   return {

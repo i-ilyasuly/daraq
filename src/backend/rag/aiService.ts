@@ -31,7 +31,9 @@ const SYSTEM_PROMPT = `1. ПЕРСОНА (Кейіпкер):
 
 5. ҚАТАҢ ТЕХНИКАЛЫҚ ШЕКТЕУЛЕР (No Markdown):
 • Ешқашан Markdown белгілерін (жұлдызшалар *, **, ###) МҮЛДЕМ қолданба. Тізімдерді тек - (минус) немесе • (нүкте) арқылы жаса.
-• Тек таза Telegram HTML тегтерін қолдан: <b> (жуан), <i> (көлбеу), <blockquote> (дәйексөз). Жұлдызшалармен *қалыңдатуға* қатаң тыйым салынады.
+• Тек таза Telegram HTML тегтерін қолдан: <b> (жуан), <i> (көлбеу), <blockquote> (дәйексөз), <code> (бір басумен көшіру), <tg-spoiler> (жасырын мәтіні). Жұлдызшалармен *қалыңдатуға* қатаң тыйым салынады.
+• АВТОМАТТЫ КӨШІРУ (Auto-Copy): Құран аяттарының арабшасын, дұғалардың транскрипциясын немесе жаттап алуға қажетті нақты дұға мәтіндерін міндетті түрде <code>...</code> тегіне ал! (Мысалы: <code>Субханаллаһ</code>).
+• ЖАСЫРЫН МӘТІНДЕР (Spoiler): Егер сұрақ немесе жауапта ерлі-зайыптылар қатынасы, ғұсыл, әурет, хайыз/нифас секілді сезімтал немесе ұятты тақырыптар қозғалса, сол жауаптың ашық детальдарын міндетті түрде <tg-spoiler>...</tg-spoiler> тегіне орап жібер.
 • Telegram қолдамайтын <br>, <p> тегтерін МҮЛДЕМ қолданба! Жаңа жолға түсу үшін тек табиғи жаңа жол таңбасын (enter) қолдан!
 • Текстті ұзын етіп айнадай көшірме, сауатты қорытып жаз.`;
 
@@ -205,7 +207,8 @@ export async function generateAgentAnswerStream(
   query: string,
   onChunk: (currentFullText: string) => void,
   onAction: (statusText: string) => void,
-  threadId?: string | number
+  threadId?: string | number,
+  userLanguage?: string
 ): Promise<AnswerResult> {
   console.log(`\n[🤖] Бір кезеңді RAG жауап беру басталды (ChatID: ${chatId})`);
   
@@ -260,12 +263,16 @@ export async function generateAgentAnswerStream(
         console.log(`[⚡] Semantic Cache (Семантикалық кэш) іске қосылды...`);
         onAction('👉 Бұрынғы жауаптар негізінде жылдам қорытындылаудамын...');
         
+        const dayOfWeekC = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Almaty" })).getDay();
         const fastCachePrompt = `Сен — Daraq, Ханафи мазһабының виртуалды ұстазысың. Пайдаланушы қойған сұраққа бұрын жауап берілген. Төмендегі дайын жауаптың мағынасын сақтай отырып, оны пайдаланушы үшін жаңадан, жылы әрі табиғи етіп қайта құрастырып бер.
 Ережелер:
 1. ТЕК ҚАНА HTML тегтерін қолдан: <b> жуан сөздер үшін.
 2. Маркдаун белгілерін (мысалы, *, **) МҮЛДЕМ ҚОЛДАНБА. Тізімдер үшін қарапайым минус (-) сызықшасын қолдан.
 3. Мәтін тым тығыз болмауы үшін абзацтар арасына кішігірім бос орын (жаңа жол) қалдыр.
 4. "Бұл туралы толық мәліметті... төмендегі батырманы басып..." деген сияқты БАТЫРМАҒА сілтейтін сөздерді АЛЫП ТАСТА, өйткені батырманы жүйе өзі қосады. Жай ғана жауаптың өзін әдемілеп бер.
+${userLanguage?.startsWith('ru') ? '5. ⚠️ ПЕРЕВОД: Обязательно переведи и дай ответ на РУССКОМ языке.' : ''}
+${userLanguage?.startsWith('en') ? '5. ⚠️ TRANSLATION: Must translate and reply in ENGLISH.' : ''}
+${dayOfWeekC === 5 ? '6. ⚠️ БҮГІН ЖҰМА: Бұл қасиетті Жұма күні. Жауабыңа «Жұма мүбәрак болсын! 🎊» мағынасындағы құттықтауды қос.' : ''}
 
 Ескі жауап:
 """
@@ -311,6 +318,17 @@ ${hit.answer}
         if (lastUser) {
             currentPrompt = `[Алдыңғы хабарлама]: ${lastUser.parts[0].text}\n\n[Жаңа сұрақ]: ${currentPrompt}`;
         }
+    }
+
+    if (userLanguage && userLanguage.startsWith('ru')) {
+        currentPrompt = `[⚠️ ПЕРЕВОД: Отвечай только на РУССКОМ языке]\n` + currentPrompt;
+    } else if (userLanguage && userLanguage.startsWith('en')) {
+        currentPrompt = `[⚠️ TRANSLATION: Reply strictly in ENGLISH]\n` + currentPrompt;
+    }
+    
+    const dayOfWeekCC = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Almaty" })).getDay();
+    if (dayOfWeekCC === 5) {
+        currentPrompt = `[⚠️ БҮГІН ЖҰМА: Бұл қасиетті Жұма күні. Жауабыңа «Жұма мүбәрак болсын! 🎊» мағынасындағы құттықтауды қос]\n` + currentPrompt;
     }
 
     if (intent === 'CHITCHAT') {
@@ -451,9 +469,21 @@ ${hit.answer}
     onAction('✍️ Шешімді қорытындылап, жауапты рәсімдеудемін...');
 
     // Промпт дайындау
+    let langInstruction = "";
+    if (userLanguage && userLanguage.startsWith('ru')) {
+        langInstruction = "\n⚠️ ТІЛДІК ЕРЕЖЕ: Пайдаланушының тілі орыс тілі (ru). Сондықтан жауапты МІНДЕТТІ ТҮРДЕ ОРЫС ТІЛІНДЕ (на русском языке) беріңіз. Барлық түсіндірмелер мен қорытындылар орысша болуы шарт.\n";
+    } else if (userLanguage && userLanguage.startsWith('en')) {
+        langInstruction = "\n⚠️ ТІЛДІК ЕРЕЖЕ: Пайдаланушының тілі ағылшын тілі (en). Жауапты МІНДЕТТІ ТҮРДЕ АҒЫЛШЫН ТІЛІНДЕ (in English) беріңіз.\n";
+    }
+
+    const dayOfWeekK = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Almaty" })).getDay();
+    if (dayOfWeekK === 5) {
+        langInstruction += "\n⚠️ БҮГІН ЖҰМА: Бұл қасиетті Жұма күні! Жауабыңның басында немесе соңында табиғи түрде «Жұма мүбәрак болсын! 🎊» мағынасындағы жылы құттықтауды қос (Орысша болса: «Джума мубарак! 🎊» немесе «Благословенной пятницы!»).\n";
+    }
+
     const finalPrompt = `ҚОЛДАНУШЫ СҰРАҒЫ:
 "${query}"
-
+${langInstruction}
 ТАБЫЛҒАН ҒЫЛЫМИ-ДІНИ КОНТЕКСТ:
 """
 ${contextText}
@@ -524,56 +554,15 @@ export async function generateAnswer(
   chatId: string, 
   query: string, 
   preFetchedSources?: SearchResult[],
-  threadId?: string | number
+  threadId?: string | number,
+  userLanguage?: string
 ): Promise<AnswerResult> {
   return generateAgentAnswerStream(
     chatId,
     query,
     () => {},
     () => {},
-    threadId
+    threadId,
+    userLanguage
   );
-}
-
-/**
- * Үлкен мәтін ішінен қолданушының сұрағына нақты жауап бола алатын сөйлемді (extract) тауып алу.
- */
-export async function findExactQuoteForHighlight(query: string, chunkText: string): Promise<string> {
-  if (!query || !chunkText) return chunkText;
-  
-  const prompt = `Сен — Қазақ тіліндегі дәлдік бойынша мәтін анализаторысың.
-Сенің мақсатың: төменде берілген ТҮПНҰСҚА МӘТІН ішінен СҰРАҚ-қа дәл және нақты жауап бола алатын, дәлел бола алатын сөйлемді немесе сөйлемдерді ҒАНА бөліп алып (көшіріп) шығару. Ешқандай өзгеріссіз түпнұсқадан қалай болды солай ал.
-
-ЕГЕР түпнұсқа мәтінде жауап жоқ болса немесе түсініксіз болса, мәтіннің алғашқы сөйлемін ғана шығар.
-Сенің жауабың ТЕК ҚАНА бөліп алынған сөйлем болуы керек. Басқа ешқандай түсініктеме қоспа. Жартылай кесіп тастама, сөйлемді толығымен шығар.
-
-СҰРАҚ:
-${query}
-
-ТҮПНҰСҚА МӘТІН:
-${chunkText}
-`;
-
-  try {
-    const res = await generateContentFixed({
-      model: GEMINI_GENERATION_MODEL, // Using the fast model
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      config: {
-        maxOutputTokens: 1024,
-        temperature: 0.1, // Very low temperature for pure extraction
-      }
-    });
-
-    console.log("VERTEX RAW RESP:", JSON.stringify(res, null, 2));
-
-    let extracted = res.text?.trim() || "";
-    if (extracted.length > 5) {
-      return extracted;
-    }
-  } catch (e) {
-    console.error("[⚠️] Error extracting exact quote:", e);
-  }
-
-  // Fallback to the original chunk if extraction fails
-  return chunkText;
 }

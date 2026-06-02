@@ -20,11 +20,11 @@ jest.mock('./aiClient', () => ({
 }));
 
 jest.mock('./searchService', () => ({
-  searchAnswers: jest.fn()
+  searchAnswers: jest.fn().mockResolvedValue([])
 }));
 
 jest.mock('./cacheService', () => ({
-  checkCache: jest.fn().mockResolvedValue(null),
+  checkCache: jest.fn().mockResolvedValue({ hit: null, vector: undefined }),
   writeCache: jest.fn().mockResolvedValue(undefined)
 }));
 
@@ -73,37 +73,31 @@ describe('aiService (Agentic RAG)', () => {
       expect(onAction).not.toHaveBeenCalled();
     });
 
-    it('calls tool, searches database, and handles subsequent stream', async () => {
-      // First iteration: Model returns a function call
-      async function* mockStream1() {
-        yield {
-          functionCalls: [{ name: 'searchDatabase', args: { searchQuery: 'namaz' } }]
-        };
-      }
-      
-      // Second iteration: Model computes final answer
-      async function* mockStream2() {
+    it('calls parallel search on database and handles response stream', async () => {
+      // Clean mock state
+      (generateContentStreamFixed as jest.Mock).mockReset();
+
+      async function* mockStream() {
         yield { text: 'This is ' };
         yield { text: 'about Namaz.' };
       }
 
-      (generateContentStreamFixed as jest.Mock)
-        .mockResolvedValueOnce(mockStream1())
-        .mockResolvedValueOnce(mockStream2());
+      (generateContentStreamFixed as jest.Mock).mockResolvedValue(mockStream());
 
       const mockSearchResults = [{ book: 'Namaz Book', page: 1, text: 'Namaz is...', score: 0.9 }];
-      (searchService.searchAnswers as jest.Mock).mockResolvedValue(mockSearchResults);
+      (searchService.searchAnswers as jest.Mock).mockResolvedValueOnce(mockSearchResults);
 
       const onChunk = jest.fn();
       const onAction = jest.fn();
 
-      const res = await generateAgentAnswerStream('chat_2', 'what is namaz?', onChunk, onAction);
+      const res = await generateAgentAnswerStream('chat_2', 'намаз деген не?', onChunk, onAction);
 
       // Verify Actions
-      expect(onAction).toHaveBeenCalledWith('👉 Мәліметтер ізделуде...');
+      expect(onAction).toHaveBeenCalledWith('🔍 Қажетті дереккөздерді қарастырудамын...');
+      expect(onAction).toHaveBeenCalledWith('✍️ Шешімді қорытындылап, жауапты рәсімдеудемін...');
       
-      // Verify Function Calling behavior
-      expect(searchService.searchAnswers).toHaveBeenCalledWith('namaz');
+      // Verify book search was called with query
+      expect(searchService.searchAnswers).toHaveBeenCalledWith('намаз деген не?', undefined);
       
       // Verify final response
       expect(onChunk).toHaveBeenCalledTimes(2);
@@ -113,28 +107,21 @@ describe('aiService (Agentic RAG)', () => {
       expect(res.sources).toEqual(mockSearchResults);
     });
 
-    it('calls get_quran_verse tool, searches Quran, and handles subsequent stream', async () => {
-      // First iteration: Model returns a function call for Quran
-      async function* mockStream1() {
-        yield {
-          functionCalls: [{ name: 'get_quran_verse', args: { verseKeyOrQuery: '2:183' } }]
-        };
-      }
-      
-      // Second iteration: Model computes final answer
-      async function* mockStream2() {
+    it('identifies Quran reference in query, searches Quran, and handles response stream', async () => {
+      // Clean mock state
+      (generateContentStreamFixed as jest.Mock).mockReset();
+
+      async function* mockStream() {
         yield { text: 'Oraza ' };
         yield { text: 'ayaty.' };
       }
 
-      (generateContentStreamFixed as jest.Mock)
-        .mockResolvedValueOnce(mockStream1())
-        .mockResolvedValueOnce(mockStream2());
+      (generateContentStreamFixed as jest.Mock).mockResolvedValue(mockStream());
 
       const mockQuranVerse = {
         verseKey: '2:183',
         arabicText: 'يَا أَيُّهَا الَّذِينَ...',
-        translationText: 'Әй иман келтіргендер...',
+        translationText: 'Әй іман келтіргендер...',
         surahNameKk: 'Бақара',
         quranComUrl: 'https://quran.com/2/183'
       };
@@ -146,9 +133,10 @@ describe('aiService (Agentic RAG)', () => {
       const res = await generateAgentAnswerStream('chat_4', '2:183 аяты', onChunk, onAction);
 
       // Verify actions
-      expect(onAction).toHaveBeenCalledWith('👉 Мәліметтер ізделуде...');
+      expect(onAction).toHaveBeenCalledWith('🔍 Қажетті дереккөздерді қарастырудамын...');
+      expect(onAction).toHaveBeenCalledWith('✍️ Шешімді қорытындылап, жауапты рәсімдеудемін...');
       
-      // Verify Function Calling behavior
+      // Verify Quran service was called
       expect(quranService.fetchSingleVerse).toHaveBeenCalledWith('2:183');
       
       // Verify final response
@@ -159,7 +147,7 @@ describe('aiService (Agentic RAG)', () => {
       expect(res.sources[0]).toEqual({
         book: 'Бақара сүресі',
         page: 183,
-        text: 'يَا أَيُّهَا الَّذِينَ...\nӘй иман келтіргендер...',
+        text: 'يَا أَيُّهَا الَّذِينَ...\nӘй іман келтіргендер...',
         imageUrl: '',
         score: 1.0,
         isQuran: true,
@@ -199,6 +187,56 @@ describe('aiService (Agentic RAG)', () => {
       expect(res.answer).toContain('Кешіріңіз');
       expect(res.sources).toEqual([]);
     });
+
+    it('uses fast track semantic cache hit and paraphrases the response using LLM instead of returning verbatim', async () => {
+      (generateContentStreamFixed as jest.Mock).mockReset();
+      const cacheService = require('./cacheService');
+      const mockCachedSources = [{ book: 'Cache Book', page: 12, text: 'Some cached text', score: 1.0 }];
+      (cacheService.checkCache as jest.Mock).mockResolvedValueOnce({
+        hit: {
+          answer: 'Бұл ораза бұзылса қазасын өтеу керек деген ескі жауап мәтіні.',
+          sources: mockCachedSources
+        },
+        vector: [0.1, 0.2]
+      });
+
+      // LLM paraphrase response
+      async function* mockParaphraseStream() {
+        yield { text: 'Жаңаша өңделген жылы ' };
+        yield { text: 'жауап мәтіні.' };
+      }
+      (generateContentStreamFixed as jest.Mock).mockResolvedValueOnce(mockParaphraseStream());
+
+      const onChunk = jest.fn();
+      const onAction = jest.fn();
+
+      const result = await generateAgentAnswerStream(
+        'chat_cache_test',
+        'ораза бұзылса ne болады?',
+        onChunk,
+        onAction
+      );
+
+      // Verify onAction was called with paraphrasing/processing status
+      expect(onAction).toHaveBeenCalledWith('👉 Бұрынғы жауаптар негізінде жылдам қорытындылаудамын...');
+
+      // Verify LLM was asked to restructure/paraphrase the cached answer
+      expect(generateContentStreamFixed).toHaveBeenCalledWith(expect.objectContaining({
+        contents: expect.arrayContaining([
+          expect.objectContaining({
+            parts: expect.arrayContaining([
+              expect.objectContaining({
+                text: expect.stringContaining('мағынасын сақтай отырып, оны пайдаланушы үшін жаңадан')
+              })
+            ])
+          })
+        ])
+      }));
+
+      // Verify chunking and final response correctly return the paraphrased text instead of verbatim cached answer
+      expect(onChunk).toHaveBeenCalledWith('Жаңаша өңделген жылы жауап мәтіні.');
+      expect(result.answer).toBe('Жаңаша өңделген жылы жауап мәтіні.');
+      expect(result.sources).toEqual(mockCachedSources);
+    });
   });
 });
-

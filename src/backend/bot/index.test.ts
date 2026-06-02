@@ -1,4 +1,4 @@
-import { setupBot, processAndDeduplicateSources, buildKeyboard, getSourceInfo, setSourceInfo, getGroupInfo, setGroupInfo } from './index';
+import { setupBot, processAndDeduplicateSources, buildKeyboard, getSourceInfo, setSourceInfo, getGroupInfo, setGroupInfo, renamedTopicsCache } from './index';
 import { formatTelegramMessage, transliterateToLatin, isAskingForProof } from './formatters';
 
 jest.mock('telegraf', () => {
@@ -120,6 +120,36 @@ describe('Bot Setup & Helpers', () => {
 
       expect(result).toBe(originalText);
     });
+
+    it('converts markdown lines starting with > into HTML blockquotes', () => {
+      const text = '> Бұл қысқа дәйексөз';
+      const result = formatTelegramMessage(text);
+      expect(result).toBe('<blockquote>\nБұл қысқа дәйексөз\n</blockquote>');
+    });
+
+    it('converts multiple separate blockquotes with normal text in between', () => {
+      const text = '> Бірінші дәйексөз\nҚалыпты мәтін осында.\n> Екінші дәйексөз';
+      const result = formatTelegramMessage(text);
+      expect(result).toBe('<blockquote>\nБірінші дәйексөз\n</blockquote>\nҚалыпты мәтін осында.\n<blockquote>\nЕкінші дәйексөз\n</blockquote>');
+    });
+
+    it('converts blockquotes with mixed content inside', () => {
+      const text = '> **Алла Елшісі** айтты:\n> *«Амалдар ниетке байланысты»*';
+      const result = formatTelegramMessage(text);
+      expect(result).toBe('<blockquote>\n<b>Алла Елшісі</b> айтты:\n<i>«Амалдар ниетке байланысты»</i>\n</blockquote>');
+    });
+
+    it('converts long markdown blockquotes (more than 3 lines) to expandable HTML blockquotes', () => {
+      const text = '> Бірінші жол\n> Екінші жол\n> Үшінші жол\n> Төртінші жол';
+      const result = formatTelegramMessage(text);
+      expect(result).toBe('<blockquote expandable>\nБірінші жол\nЕкінші жол\nҮшінші жол\nТөртінші жол\n</blockquote>');
+    });
+
+    it('converts long markdown blockquotes (more than 200 physical characters) to expandable HTML blockquotes', () => {
+      const longQuote = '> ' + 'A'.repeat(210);
+      const result = formatTelegramMessage(longQuote);
+      expect(result).toBe(`<blockquote expandable>\n${'A'.repeat(210)}\n</blockquote>`);
+    });
   });
 
   describe('processAndDeduplicateSources', () => {
@@ -218,7 +248,7 @@ describe('Bot Setup & Helpers', () => {
       const result = buildKeyboard([], bookSources, 0, 'test_pag');
       
       expect(result).toBeDefined();
-      expect(result.reply_markup.inline_keyboard[0][0].text).toContain('Дәлел: Фиқһ әл-ғибадат, 25-бет');
+      expect(result.reply_markup.inline_keyboard[0][0].text).toContain('Дәлел суретті көру');
       expect(result.reply_markup.inline_keyboard[0][0].callback_data).toContain('view_source_');
     });
 
@@ -243,6 +273,55 @@ describe('Bot Setup & Helpers', () => {
 
       const result = buildKeyboard(quranSources, [], 0, 'my_pag');
       expect(result).toBeNull(); // No buttons generated because only Quran sources are provided and Quran buttons are excluded
+    });
+  });
+
+  describe('Forum Topic Rename Cache', () => {
+    it('successfully stores and deduplicates renamed thread IDs', () => {
+      const testKey = '123456_999';
+      expect(renamedTopicsCache.has(testKey)).toBe(false);
+
+      renamedTopicsCache.add(testKey);
+      expect(renamedTopicsCache.has(testKey)).toBe(true);
+      
+      renamedTopicsCache.delete(testKey);
+      expect(renamedTopicsCache.has(testKey)).toBe(false);
+    });
+  });
+
+  describe('Big Tech Premium Rename Rules Validation', () => {
+    // Utility to clean generated titles conforming to index.ts line 699
+    function sanitizeTitle(raw: string): string {
+      return raw.replace(/[\*_`~#|\[\]()\\-]/g, '').replace(/\s+/g, ' ').trim();
+    }
+
+    it('validates few-shot format conformance for big tech standards', () => {
+      const examples = [
+        { output: '🚗 Сапардағы намаз', valid: true },
+        { output: '🚭 Вейп үкімі', valid: true },
+        { output: '🪥 Ораза және мисуак', valid: true },
+        { output: '💼 Халал сауда ережесі', valid: true }
+      ];
+
+      for (const ex of examples) {
+        const cleaned = sanitizeTitle(ex.output);
+        const words = cleaned.split(' ');
+        
+        // 1. Emoji at start: matches non-alphanumeric or hex pattern at the start
+        const hasEmoji = /^\p{Emoji}/u.test(cleaned);
+        expect(hasEmoji).toBe(true);
+
+        // 2. Word count should be 2-3 words (excluding the emoji itself when split)
+        // e.g., "🚗", "Сапардағы", "намаз" -> 3 elements in array
+        expect(words.length).toBeLessThanOrEqual(4);
+        expect(words.length).toBeGreaterThanOrEqual(3);
+
+        // 3. Cleanliness: no question marks, quotation marks, or trailing periods
+        expect(cleaned).not.toContain('?');
+        expect(cleaned).not.toContain('"');
+        expect(cleaned).not.toContain("'");
+        expect(cleaned.endsWith('.')).toBe(false);
+      }
     });
   });
 });

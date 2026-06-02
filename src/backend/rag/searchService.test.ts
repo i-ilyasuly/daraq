@@ -1,5 +1,5 @@
 import { searchAnswers } from './searchService';
-import { ai } from './aiClient';
+import { embedText } from './aiClient';
 import { qdrant } from '../db/qdrant';
 
 jest.mock('./aiClient', () => ({
@@ -7,7 +7,8 @@ jest.mock('./aiClient', () => ({
     models: {
       embedContent: jest.fn()
     }
-  }
+  },
+  embedText: jest.fn()
 }));
 
 jest.mock('../db/qdrant', () => ({
@@ -20,7 +21,7 @@ describe('searchService', () => {
   let fetchMock: jest.Mock;
 
   beforeEach(() => {
-    // Mock global fetch for Cohere API
+    // Mock global fetch for Cohere API (if ever fallback used)
     fetchMock = jest.fn().mockResolvedValue({
       ok: true,
       json: jest.fn().mockResolvedValue({
@@ -38,9 +39,9 @@ describe('searchService', () => {
   });
 
   it('should search answers successfully', async () => {
-    // Mock the embeddings response
-    (ai.models.embedContent as jest.Mock).mockResolvedValue({
-      embeddings: [{ values: [0.1, 0.2, 0.3] }]
+    // Mock the embedText response
+    (embedText as jest.Mock).mockResolvedValue({
+      embeddings: [{ values: new Array(1536).fill(0.1) }]
     });
 
     // Mock Qdrant query
@@ -64,7 +65,7 @@ describe('searchService', () => {
     expect(results[0].text).toBe('This is a test text');
     expect(results[0].book).toBe('Test Book');
     expect(results[0].page).toBe(10);
-    expect(results[0].score).toBe(0.95); // updated by reranker mock
+    expect(results[0].score).toBe(0.9); // raw Qdrant hybrid score (reranker skipped)
 
     expect(qdrant.query).toHaveBeenCalledWith('daraq_books', expect.objectContaining({
       query: { fusion: "rrf" },
@@ -74,13 +75,13 @@ describe('searchService', () => {
   });
 
   it('should return empty array on embedding error', async () => {
-    (ai.models.embedContent as jest.Mock).mockRejectedValue(new Error('API Error'));
+    (embedText as jest.Mock).mockRejectedValue(new Error('API Error'));
     const results = await searchAnswers('test query');
     expect(results).toEqual([]);
   });
 
   it('should return empty array if no vectors generated', async () => {
-    (ai.models.embedContent as jest.Mock).mockResolvedValue({
+    (embedText as jest.Mock).mockResolvedValue({
       embeddings: []
     });
     const results = await searchAnswers('test query');

@@ -5,7 +5,7 @@ import sharp from 'sharp';
 import { Storage } from '@google-cloud/storage';
 import { storage as customStorage } from '../storage';
 import { searchAnswers } from '../rag/searchService';
-import { generateAgentAnswerStream } from '../rag/aiService';
+import { generateAgentAnswerStream, saveToChatHistory, rewindHistory } from '../rag/aiService';
 import { ai } from '../rag/aiClient';
 import { db } from '../db/firestore';
 
@@ -21,6 +21,11 @@ interface SourceInfo {
   targetText?: string;
   query?: string;
 }
+
+// Memory tracking for stream aborts and message mapping
+export const ongoingStreams = new Map<string, AbortController>();
+export const userToBotMsgMap = new Map<string, number>();
+export const sourceUploadCache = new Map<string, { chatId: string, messageIds: number[] }>();
 
 // ... original cache map
 const sourceCache = new Map<string, SourceInfo>();
@@ -93,7 +98,7 @@ interface PaginationState {
 }
 
 const paginationCache = new Map<string, PaginationState>();
-const renamedTopicsCache = new Set<string>();
+export const renamedTopicsCache = new Set<string>();
 const pendingSourcesCache = new Map<string, any>();
 
 export function processAndDeduplicateSources(rawSources: any[], answerText?: string): { quranSources: any[]; bookSources: any[] } {
@@ -392,6 +397,52 @@ async function addWatermark(imageUrl: string, bookName: string, pageNumber: numb
   }
 }
 
+async function setupBotProfile(telegram: any) {
+  try {
+    // 1. Қазақ тіліндегі сипаттамалар (kk)
+    await telegram.callApi('setMyDescription', {
+      description: 'Daraq — Ханафи мазһабы бойынша сенімді діни жасанды интеллект көмекшісі. Сенімді классикалық кітаптардан дәлелдер тауып, жауап береді.',
+      language_code: 'kk'
+    });
+    await telegram.callApi('setMyShortDescription', {
+      short_description: 'Ханафи мазһабы бойынша сенімді діни AI көмекшісі.',
+      language_code: 'kk'
+    });
+
+    // 2. Орыс тіліндегі сипаттамалар (ru)
+    await telegram.callApi('setMyDescription', {
+      description: 'Daraq — надежный религиозный ИИ-помощник по мазхабу Ханафи. Находит ответы со ссылками на классические исламские книги.',
+      language_code: 'ru'
+    });
+    await telegram.callApi('setMyShortDescription', {
+      short_description: 'Надежный ИИ-помощник по мазхабу Ханафи.',
+      language_code: 'ru'
+    });
+
+    // 3. Ағылшын тіліндегі сипаттамалар (en)
+    await telegram.callApi('setMyDescription', {
+      description: 'Daraq — a reliable religious AI assistant following the Hanafi school of thought. It provides answers with proofs from classical Islamic books.',
+      language_code: 'en'
+    });
+    await telegram.callApi('setMyShortDescription', {
+      short_description: 'Reliable Hanafi Islamic AI assistant.',
+      language_code: 'en'
+    });
+
+    // 4. Жалпылама (Default) сипаттамалар
+    await telegram.callApi('setMyDescription', {
+      description: 'Daraq — Ханафи мазһабы бойынша сенімді діни жасанды интеллект көмекшісі. Сенімді классикалық кітаптардан дәлелдер тауып, жауап береді.'
+    });
+    await telegram.callApi('setMyShortDescription', {
+      short_description: 'Ханафи мазһабы бойынша сенімді діни AI көмекшісі.'
+    });
+
+    console.log('[✅] Telegram bot profiles (description, short_description) updated successfully.');
+  } catch (err) {
+    console.error('[⚠️] Failed to update Telegram bot profiles:', err);
+  }
+}
+
 export function setupBot() {
   const token = process.env.TELEGRAM_BOT_TOKEN;
   const appUrl = process.env.APP_URL;
@@ -402,9 +453,23 @@ export function setupBot() {
   }
 
   const bot = new Telegraf(token);
+  setupBotProfile(bot.telegram);
 
-  // 1. Автоматты сәлемдесу
-  bot.start((ctx) => {
+  // 1. Автоматты сәлемдесу және Терең сілтемелер (Deep Linking)
+  bot.start(async (ctx: any) => {
+    const startPayload = ctx.startPayload;
+    if (startPayload) {
+      let query = startPayload.replace(/_/g, ' ');
+      if (startPayload.toLowerCase() === 'namaz_fatwa') {
+         query = 'Намаз пәтуасы';
+      } else if (startPayload.toLowerCase() === 'oraza_fatwa') {
+         query = 'Ораза пәтуасы';
+      } else if (startPayload.toLowerCase() === 'sapar_fiqhy') {
+         query = 'Сапар фиқһы және сапар намазы сұрақтары';
+      }
+      return handleIncomingMessage(ctx, query);
+    }
+
     const userName = ctx.from?.first_name || 'Қолданушы';
     return ctx.replyWithHTML(
       `Ассалаумағалейкум, <b>${userName}</b>!\n\nМен <b>Daraq</b> — Ханафи мазһабы бойынша сенімді діни көмекшіңізбін. Қандай сұрағыңыз бар?`
@@ -445,24 +510,31 @@ export function setupBot() {
     }
   });
 
-  bot.on('message', async (ctx: any) => {
+  const handleIncomingMessage = async (ctx: any, customQuery?: string) => {
     const chatId = String(ctx.chat.id);
     const targetThreadId = ctx.message?.message_thread_id;
-    const query = ctx.message && ('text' in ctx.message) ? ctx.message.text : '';
+    const query = customQuery || (ctx.message && ('text' in ctx.message) ? ctx.message.text : '');
 
     if (!query) return;
 
-    let isFirstTopicMessage = false;
     const topicCacheKey = `${chatId}_${targetThreadId || 'general'}`;
-    const draftId = ctx.message.message_id; // Using user message_id as draft identifier!
+    const draftId = ctx.message ? ctx.message.message_id : Math.floor(Math.random() * 100000); // Using user message_id or custom fake ID
+
+    // Map new stream logic
+    const abortController = new AbortController();
+    const streamKey = `${chatId}_${targetThreadId || 'general'}`;
+    // If a stream is already running for this user in this thread, we could abort it, 
+    // but the requirement mostly implies aborting on *edit*. We will store it here anyway.
+    ongoingStreams.set(streamKey, abortController);
 
     try {
       // Typing status indicating bot is thinking
       let isAgentThinking = true;
+      let currentActionStatus = 'typing';
       const sendTypingStatus = async () => {
         try {
-          if (isAgentThinking) {
-            await ctx.telegram.sendChatAction(chatId, 'typing', targetThreadId ? { message_thread_id: targetThreadId } : undefined);
+          if (isAgentThinking && !abortController.signal.aborted) {
+            await ctx.telegram.sendChatAction(chatId, currentActionStatus as 'typing' | 'choose_sticker', targetThreadId ? { message_thread_id: targetThreadId } : undefined);
           }
         } catch (e) {}
       };
@@ -482,23 +554,7 @@ export function setupBot() {
         // Ignore API failures for draft
       }
 
-      if (targetThreadId && db) {
-        if (!renamedTopicsCache.has(topicCacheKey)) {
-          const topicDoc = await db.collection('users').doc(chatId).collection('topics').doc(String(targetThreadId)).get();
-          if (topicDoc.exists && topicDoc.data()?.renamed) {
-            renamedTopicsCache.add(topicCacheKey);
-          } else {
-            const topicMessages = await db.collection('users').doc(chatId).collection('topics').doc(String(targetThreadId)).collection('messages').limit(1).get();
-            const hasPriorMessages = !topicMessages.empty;
-            if (hasPriorMessages) {
-              renamedTopicsCache.add(topicCacheKey);
-            } else {
-              isFirstTopicMessage = true;
-              renamedTopicsCache.add(topicCacheKey);
-            }
-          }
-        }
-      }
+      // No blocking Firestore logic here to maximize response speed!
 
       const threadStr = (targetThreadId !== undefined && targetThreadId !== null) ? String(targetThreadId) : 'general';
 
@@ -512,6 +568,7 @@ export function setupBot() {
         chatId,
         query,
         async (currentFullText) => {
+          if (abortController.signal.aborted) return;
           const formatted = formatTelegramMessage(currentFullText);
           try {
             await ctx.telegram.callApi('sendMessageDraft', {
@@ -524,6 +581,12 @@ export function setupBot() {
           } catch(e) {}
         },
         async (statusText) => {
+          if (abortController.signal.aborted) return;
+          if (statusText.includes('іздеу') || statusText.includes('қарастырудамын')) {
+             currentActionStatus = 'choose_sticker';
+          } else {
+             currentActionStatus = 'typing';
+          }
           try {
             await ctx.telegram.callApi('sendMessageDraft', {
               chat_id: chatId,
@@ -535,11 +598,14 @@ export function setupBot() {
           } catch (e) {}
         },
         targetThreadId,
-        lang
+        lang,
+        abortController.signal,
+        true // skip internal history saving, we do it here!
       );
 
       isAgentThinking = false;
       clearInterval(typingInterval);
+      ongoingStreams.delete(streamKey);
 
       let relevantSources: any[] = [];
       if (answerData.sources && answerData.sources.length > 0) {
@@ -596,24 +662,18 @@ export function setupBot() {
 
       let finalMessage = formatTelegramMessage(answerData.answer, quranSources);
 
-      const quoteMatch = query.match(/[^.?!]+[.?!]/);
-      let quoteText = quoteMatch ? quoteMatch[0].trim() : query.trim();
-      if (quoteText.length > 200) {
-        quoteText = quoteText.substring(0, 200);
-      }
-      const exactQuoteText = query.includes(quoteText) ? quoteText : query.substring(0, Math.min(200, query.length));
-
       const extraOptions: any = { 
         parse_mode: 'HTML',
         disable_web_page_preview: true,
         link_preview_options: { is_disabled: true }
       };
 
-      // Нақты сөйлемнен дәйексөз келтіру (Quote in Reply Parameters)
-      extraOptions.reply_parameters = {
-        message_id: ctx.message.message_id,
-        quote: exactQuoteText
-      };
+      // Нақты сөйлемнен дәйексөз келтіру (Quote in Reply Parameters) алынып тасталды (UX Visual Bug fix)
+      if (ctx.message && ctx.message.message_id) {
+        extraOptions.reply_parameters = {
+          message_id: ctx.message.message_id
+        };
+      }
 
       if (targetThreadId) {
         extraOptions.message_thread_id = targetThreadId;
@@ -637,22 +697,66 @@ export function setupBot() {
       }
 
       // Финалдық хабарламаны жібереміз
+      let botSentMsg: any = null;
       try {
-        await ctx.telegram.sendMessage(chatId, finalMessage, extraOptions);
+        botSentMsg = await ctx.telegram.sendMessage(chatId, finalMessage, extraOptions);
       } catch (replyError) {
         console.error("[⚠️] HTML форматымен жіберу қатесі, таза мәтін жіберілуде:", replyError);
         const plainText = finalMessage.replace(/<[^>]*>?/gm, '');
         const plainOptions: any = { ...extraOptions };
         delete plainOptions.parse_mode;
         if (inlineKeyboard) Object.assign(plainOptions, inlineKeyboard);
-        await ctx.telegram.sendMessage(chatId, plainText, plainOptions);
+        botSentMsg = await ctx.telegram.sendMessage(chatId, plainText, plainOptions);
+      }
+
+      // Жадқа және дерекқорға сақтау
+      if (botSentMsg) {
+         userToBotMsgMap.set(draftId.toString(), botSentMsg.message_id);
+         saveToChatHistory(chatId, 'user', query, targetThreadId, draftId).catch(()=>{});
+         saveToChatHistory(chatId, 'bot', answerData.answer, targetThreadId, botSentMsg.message_id, draftId).catch(()=>{});
       }
 
       // Стриминг толық аяқталған соң ғана тақырып атын өзгерту
-      if (isFirstTopicMessage && targetThreadId) {
+      console.log(`[Rename Check] chatId: ${chatId}, targetThreadId: ${targetThreadId}, intent: ${answerData?.intent}, cacheKey: ${chatId}_${targetThreadId || 'general'}`);
+      if (targetThreadId && answerData?.intent === 'KNOWLEDGE_SEARCH') {
+        const tCacheKey = `${chatId}_${targetThreadId}`;
         (async () => {
           try {
-            const prompt = `Мына Сұрақ пен Жауапты талдап, олардың негізгі тақырыбын 2-3 сөзден тұратын қысқа, нұсқа әрі тартымды атауға айналдыр. Басына міндетті түрде тақырыпқа сай 1 эмодзи қос. Тек қазақ тілінде жаз.\n\nСұрақ: "${query}"\nЖауап: "${finalMessage}"`;
+            if (db) {
+              // 1. Жергілікті кэште бар ма, тексереміз
+              if (renamedTopicsCache.has(tCacheKey)) {
+                console.log(`[Rename Check] Skipping rename, already in local memory cache: ${tCacheKey}`);
+                return;
+              }
+              // 2. Firestore-дан бұрын өзгерген-өзгөрмегенін тексереміз
+              const topicDoc = await db.collection('users').doc(chatId).collection('topics').doc(String(targetThreadId)).get();
+              if (topicDoc.exists && topicDoc.data()?.renamed) {
+                console.log(`[Rename Check] Skipping rename, Firestore indicates already marked 'renamed' for thread: ${targetThreadId}`);
+                renamedTopicsCache.add(tCacheKey);
+                return;
+              }
+            }
+
+            console.log(`[Rename Check] Proceeding to generate premium Big Tech name for thread/topic ${targetThreadId}...`);
+
+            const prompt = `Сен — Telegram тақырыптарының атауын жасайтын кәсіби редакторсың. 
+Мына сұрақ пен жауапты талдап, олардың негізгі тақырыбын Big Tech (ChatGPT, Claude) стандарттарына 100% сай келетіндей етіп жаса.
+
+ҚАТАҢ ЕРЕЖЕЛЕР:
+1. ҰЗЫНДЫҒЫ: Атау қатаң түрде тек 2-3 сөзден ғана тұруы керек.
+2. ФОРМАТЫ: Сұраулы сөйлем немесе етістік қолданба (мысалы: "Ораза қалай ұстайды?" немесе "Намаз қалай оқылады?" деп жазуға МҮЛДЕМ ТЫЙЫМ САЛЫНАДЫ). Оның орнына тек зат есіммен немесе атау тұлғасында жаз (мысалы: "Ораза ұстау тәртібі" немесе "Сапардағы намаз").
+3. ТАЗАЛЫҚ: Ешқандай тырнақша ("...", '...'), нүкте (.), үтір, сұрақ белгісі немесе басқа тыныс белгілерін мүлдем қолданба.
+4. ДИЗАЙН: Тақырып атауының ең басына тақырыпқа сәйкес келетін ТЕК 1 эмодзи қос (мысалы: 🚗 немесе 🚭).
+5. ТІЛ: Тек қазақ тілінде жаз.
+
+ҮЛГІ (Few-Shot Examples):
+- Пайдаланушы: "Жолаушымын, намаз не болады?" -> 🚗 Сапардағы намаз
+- Пайдаланушы: "Вейп шегу харам ба?" -> 🚭 Вейп үкімі
+- Пайдаланушы: "Ораза ұстағанда тіс тазалауға бола ма?" -> 🪥 Ораза және мисуак
+- Пайдаланушы: "Саудада ақшаны қалай өсімсіз аламыз?" -> 💼 Халал сауда ережесі
+
+Сұрақ: "${query}"
+Жауап: "${finalMessage}"`;
             
             const aiPromise = ai.models.generateContent({
               model: 'gemini-3.1-flash-lite',
@@ -697,6 +801,7 @@ export function setupBot() {
                   updatedAt: new Date()
                 }, { merge: true });
               }
+              renamedTopicsCache.add(tCacheKey);
             }
           } catch(e) {
             console.error('[AI] Топик атын өзгерту кезінде қателік:', e);
@@ -705,6 +810,10 @@ export function setupBot() {
       }
 
     } catch (error: any) {
+      if (error?.message === 'AbortError') {
+         console.log(`[🛑] Message stream aborted for chat ${chatId}`);
+         return; // Do nothing, another branch is handling it.
+      }
       console.error("[❌] Telegram ботта қателік орын алды:", error);
       const errorStr = String(error?.response?.data || error?.message || error || "");
       console.error("Толық қате сипаттамасы:", errorStr);
@@ -723,6 +832,222 @@ export function setupBot() {
       } catch (e) {
         console.error("Error sending failure message:", e);
       }
+    }
+  };
+
+  bot.on('message', async (ctx: any) => {
+    await handleIncomingMessage(ctx);
+  });
+
+  // Handle edited messages for specific Rewind & Streaming UX
+  bot.on('edited_message', async (ctx: any) => {
+    const chatId = String(ctx.chat.id);
+    const targetThreadId = ctx.editedMessage?.message_thread_id;
+    const query = ctx.editedMessage && ('text' in ctx.editedMessage) ? ctx.editedMessage.text : '';
+
+    if (!query) return;
+    const draftId = ctx.editedMessage.message_id;
+
+    const streamKey = `${chatId}_${targetThreadId || 'general'}`;
+    
+    // 1. Ағынды тоқтату (егер осы чатта жауап жазылып жатса)
+    const existingStream = ongoingStreams.get(streamKey);
+    if (existingStream) {
+      console.log(`[🛑] Aborting ongoing stream for edited message in chat ${chatId}`);
+      existingStream.abort();
+      ongoingStreams.delete(streamKey);
+    }
+
+    // 2. Бұған дейінгі контекстті дерекқордан тазарту (Rewind History)
+    const rewindResult = await rewindHistory(chatId, targetThreadId, draftId, query);
+    const deletedMsgIds = rewindResult.deletedMsgIds;
+    const skipUserSave = rewindResult.updatedUserQuery;
+    let botMsgId = userToBotMsgMap.get(draftId.toString());
+    if (!botMsgId && db) {
+       try {
+          const threadStr = (targetThreadId !== undefined && targetThreadId !== null) ? String(targetThreadId) : 'general';
+          const snap = await db.collection('users').doc(chatId).collection('topics').doc(threadStr).collection('messages')
+              .where('replyToMsgId', '==', draftId).where('role', '==', 'bot').limit(1).get();
+          if (!snap.empty) {
+             botMsgId = snap.docs[0].data().msgId;
+             if (botMsgId) userToBotMsgMap.set(draftId.toString(), botMsgId);
+          }
+       } catch(e) {}
+    }
+
+    // Телеграмнан артық хаттарды өшіру (Mass Delete)
+    const validIdsToDelete = deletedMsgIds.filter(mId => mId !== draftId && mId !== botMsgId);
+    if (validIdsToDelete.length > 0) {
+       for (let i = 0; i < validIdsToDelete.length; i += 100) {
+          const chunk = validIdsToDelete.slice(i, i + 100);
+          try {
+             await ctx.telegram.callApi('deleteMessages', { chat_id: chatId, message_ids: chunk });
+             console.log(`[✅] Deleted ${chunk.length} messages in bulk`);
+          } catch(e) {
+             console.log(`[⚠️] Could not bulk delete messages from Telegram:`, e);
+          }
+       }
+    }
+
+    // 3. Ескі бот жауабын тауып, стримингті бастау
+    let currentBotMsgId = botMsgId;
+
+    if (currentBotMsgId) {
+       try {
+           await ctx.telegram.editMessageText(chatId, currentBotMsgId, undefined, '⏳ <i>Сұрақ өзгертілді, жаңа жауап дайындалуда...</i>', { parse_mode: 'HTML' });
+       } catch(e) {
+           console.warn("[⚠️] Could not edit previous bot message:", e);
+           currentBotMsgId = undefined; // Fallback to new message
+       }
+    }
+
+    const abortController = new AbortController();
+    ongoingStreams.set(streamKey, abortController);
+
+    try {
+      let isAgentThinking = true;
+      let currentActionStatus = 'typing';
+      const sendTypingStatus = async () => {
+        try {
+          if (isAgentThinking && !abortController.signal.aborted) {
+            await ctx.telegram.sendChatAction(chatId, currentActionStatus as 'typing' | 'choose_sticker', targetThreadId ? { message_thread_id: targetThreadId } : undefined);
+          }
+        } catch (e) {}
+      };
+      
+      const typingInterval = setInterval(sendTypingStatus, 4000);
+      sendTypingStatus();
+
+      const lang = ctx.from?.language_code;
+      const threadStr = (targetThreadId !== undefined && targetThreadId !== null) ? String(targetThreadId) : 'general';
+
+      const answerData = await generateAgentAnswerStream(
+        chatId,
+        query,
+        async (currentFullText) => {
+          if (abortController.signal.aborted) return;
+          const formatted = formatTelegramMessage(currentFullText);
+          try {
+            if (currentBotMsgId) {
+               await ctx.telegram.editMessageText(chatId, currentBotMsgId, undefined, formatted, { parse_mode: 'HTML' });
+            } else {
+               await ctx.telegram.callApi('sendMessageDraft', { chat_id: chatId, draft_id: draftId, message_thread_id: targetThreadId, text: formatted, parse_mode: 'HTML' });
+            }
+          } catch(e) {}
+        },
+        async (statusText) => {
+          if (abortController.signal.aborted) return;
+          if (statusText.includes('іздеу') || statusText.includes('қарастырудамын')) {
+             currentActionStatus = 'choose_sticker';
+          } else {
+             currentActionStatus = 'typing';
+          }
+          try {
+            const txt = `⏳ ${statusText}`;
+            if (currentBotMsgId) {
+               await ctx.telegram.editMessageText(chatId, currentBotMsgId, undefined, txt, { parse_mode: 'HTML' });
+            } else {
+               await ctx.telegram.callApi('sendMessageDraft', { chat_id: chatId, draft_id: draftId, message_thread_id: targetThreadId, text: txt, parse_mode: 'HTML' });
+            }
+          } catch (e) {}
+        },
+        targetThreadId,
+        lang,
+        abortController.signal,
+        true
+      );
+
+      isAgentThinking = false;
+      clearInterval(typingInterval);
+      ongoingStreams.delete(streamKey);
+
+      let relevantSources: any[] = [];
+      if (answerData.sources && answerData.sources.length > 0) {
+        relevantSources = filterSourcesByResponse(answerData.sources, answerData.answer);
+      }
+      
+      let cachedAnswerToUse = answerData.answer;
+      let originalQuery = query;
+      const cacheKey = `${chatId}_${threadStr}`;
+      
+      if (isAskingForProof(query)) {
+        const cachedData = pendingSourcesCache.get(cacheKey);
+        if (cachedData) {
+          if (cachedData.answer) cachedAnswerToUse = cachedData.answer;
+          if (cachedData.query) originalQuery = cachedData.query;
+          if (!relevantSources || relevantSources.length === 0) {
+            if (cachedData.sources && cachedData.sources.length > 0) {
+              relevantSources = cachedData.sources;
+            }
+          }
+        }
+      } else {
+        const sourcesToCache = (relevantSources && relevantSources.length > 0) ? relevantSources : (answerData.sources || []);
+        pendingSourcesCache.set(cacheKey, { sources: sourcesToCache, answer: answerData.answer, query: query });
+      }
+
+      let quranSources: any[] = [];
+      let bookSources: any[] = [];
+      let inlineKeyboard: any = null;
+      if (relevantSources && relevantSources.length > 0) {
+        const processed = processAndDeduplicateSources(relevantSources, cachedAnswerToUse);
+        quranSources = processed.quranSources;
+        bookSources = processed.bookSources;
+        if (quranSources.length > 0 || bookSources.length > 0) {
+          const pagId = uuidv4().substring(0, 8);
+          paginationCache.set(pagId, { quranSources, bookSources, quranPageIndex: 0, query: originalQuery });
+          inlineKeyboard = buildKeyboard(quranSources, bookSources, 0, pagId, originalQuery);
+        }
+      }
+
+      let finalMessage = formatTelegramMessage(answerData.answer, quranSources);
+
+      const extraOptions: any = { parse_mode: 'HTML', disable_web_page_preview: true, link_preview_options: { is_disabled: true } };
+      if (inlineKeyboard) Object.assign(extraOptions, inlineKeyboard);
+      
+      const lf = finalMessage.toLowerCase();
+      if (lf.includes('мүбәрак') || lf.includes('мубарак') || lf.includes('айт қабыл болсын') || lf.includes('айт кабыл болсын') || lf.includes('қабыл етсін')) {
+         extraOptions.message_effect_id = "5046509860389126442";
+      }
+
+      let botSentMsg: any = null;
+      try {
+        if (currentBotMsgId) {
+           botSentMsg = await ctx.telegram.editMessageText(chatId, currentBotMsgId, undefined, finalMessage, extraOptions);
+        } else {
+           extraOptions.reply_parameters = { message_id: draftId };
+           if (targetThreadId) extraOptions.message_thread_id = targetThreadId;
+           botSentMsg = await ctx.telegram.sendMessage(chatId, finalMessage, extraOptions);
+        }
+      } catch (replyError: any) {
+        try {
+            const plainText = finalMessage.replace(/<[^>]*>?/gm, '');
+            const plainOptions: any = { ...extraOptions };
+            delete plainOptions.parse_mode;
+            if (inlineKeyboard) Object.assign(plainOptions, inlineKeyboard);
+            if (currentBotMsgId) {
+                botSentMsg = await ctx.telegram.editMessageText(chatId, currentBotMsgId, undefined, plainText, plainOptions);
+            } else {
+                botSentMsg = await ctx.telegram.sendMessage(chatId, plainText, plainOptions);
+            }
+        } catch(e) {}
+      }
+
+      if (botSentMsg && botSentMsg !== true) {
+          userToBotMsgMap.set(draftId.toString(), botSentMsg.message_id);
+          if (!skipUserSave) saveToChatHistory(chatId, 'user', query, targetThreadId, draftId).catch(()=>{});
+          saveToChatHistory(chatId, 'bot', answerData.answer, targetThreadId, botSentMsg.message_id, draftId).catch(()=>{});
+      } else if (currentBotMsgId) {
+          if (!skipUserSave) saveToChatHistory(chatId, 'user', query, targetThreadId, draftId).catch(()=>{});
+          saveToChatHistory(chatId, 'bot', answerData.answer, targetThreadId, currentBotMsgId, draftId).catch(()=>{});
+      }
+
+    } catch (err: any) {
+        if (err?.message === 'AbortError') {
+           console.log(`[🛑] Edited message stream aborted for chat ${chatId}`);
+           return;
+        }
+        console.error("[❌] Error processing edited message:", err);
     }
   });
 
@@ -793,10 +1118,39 @@ export function setupBot() {
           ? sourceInfo.pages 
           : [sourceInfo.page];
 
+        const cacheKey = `${sourceInfo.book}_${pageList.join(',')}`;
+        if (sourceUploadCache.has(cacheKey)) {
+           const cached = sourceUploadCache.get(cacheKey)!;
+           try {
+             if (cached.messageIds.length === 1) {
+               await ctx.telegram.callApi('copyMessage', {
+                 chat_id: chatId,
+                 from_chat_id: cached.chatId,
+                 message_id: cached.messageIds[0],
+                 message_thread_id: targetThreadId
+               });
+             } else {
+               await ctx.telegram.callApi('copyMessages', {
+                 chat_id: chatId,
+                 from_chat_id: cached.chatId,
+                 message_ids: cached.messageIds,
+                 message_thread_id: targetThreadId
+               });
+             }
+             isWorking = false;
+             clearInterval(statusInterval);
+             return;
+           } catch (e) {
+             console.log("[⚠️] Failed to copy cached target, falling back to re-upload", e);
+             sourceUploadCache.delete(cacheKey);
+           }
+        }
+
       if (pageList.length <= 1) {
         // Бір ғана бет болса, әдеттегідей жалғыз сурет ретінде жібереміз
         const imageBuffer = await addWatermark(sourceInfo.imageUrl, sourceInfo.book, pageList[0]);
-        await ctx.replyWithPhoto({ source: imageBuffer }, { caption: `📖 ${sourceInfo.book}, ${pageList[0]}-бет` });
+        const sentMsg = await ctx.replyWithPhoto({ source: imageBuffer }, { caption: `📖 ${sourceInfo.book}, ${pageList[0]}-бет` });
+        sourceUploadCache.set(cacheKey, { chatId, messageIds: [sentMsg.message_id] });
       } else {
         // Екі немесе одан да көп бет болса (Cross-Page), оларды альбом (MediaGroup) ретінде жібереміз
         console.log(`[📚 CROSS-PAGE] Processing ${pageList.length} pages for ${sourceInfo.book}: [${pageList.join(', ')}]`);
@@ -830,7 +1184,10 @@ export function setupBot() {
           caption: `📖 ${sourceInfo.book}, ${res.pageNum}-бет`
         }));
 
-        await ctx.replyWithMediaGroup(media);
+        const sentMsgs = await ctx.replyWithMediaGroup(media);
+        if (Array.isArray(sentMsgs)) {
+          sourceUploadCache.set(cacheKey, { chatId, messageIds: sentMsgs.map(m => m.message_id) });
+        }
       }
 
       } catch (error) {
@@ -874,6 +1231,34 @@ export function setupBot() {
       sendPhotoStatus();
 
       try {
+        const cacheKey = `grp_${groupId}`;
+        if (sourceUploadCache.has(cacheKey)) {
+           const cached = sourceUploadCache.get(cacheKey)!;
+           try {
+             if (cached.messageIds.length === 1) {
+               await ctx.telegram.callApi('copyMessage', {
+                 chat_id: chatId,
+                 from_chat_id: cached.chatId,
+                 message_id: cached.messageIds[0],
+                 message_thread_id: targetThreadId
+               });
+             } else {
+               await ctx.telegram.callApi('copyMessages', {
+                 chat_id: chatId,
+                 from_chat_id: cached.chatId,
+                 message_ids: cached.messageIds,
+                 message_thread_id: targetThreadId
+               });
+             }
+             isWorking = false;
+             clearInterval(statusInterval);
+             return;
+           } catch (e) {
+             console.log("[⚠️] Failed to copy cached target, falling back to re-upload", e);
+             sourceUploadCache.delete(cacheKey);
+           }
+        }
+
         // Суреттерге су белгісін параллельді Promise.all арқылы қосу
         const results = await Promise.all(
           sources.map(async (src) => {
@@ -910,13 +1295,19 @@ export function setupBot() {
             media: { source: img.buffer },
             caption: `📖 ${img.book}, ${img.page}-бет`
           }));
-          await ctx.replyWithMediaGroup(media);
+          const sentMsgs = await ctx.replyWithMediaGroup(media);
+          if (Array.isArray(sentMsgs)) {
+             sourceUploadCache.set(cacheKey, { chatId, messageIds: sentMsgs.map(m => m.message_id) });
+          }
         } catch (mediaGroupError) {
           console.warn("[⚠️] Media Group жіберу қатесі, суреттерді жеке-жеке жібереміз:", mediaGroupError);
           // Fallback: send sequentially if Media Group fails
+          const messageIds: number[] = [];
           for (const img of imageBuffers) {
-            await ctx.replyWithPhoto({ source: img.buffer }, { caption: `📖 ${img.book}, ${img.page}-бет` });
+            const sentMsg = await ctx.replyWithPhoto({ source: img.buffer }, { caption: `📖 ${img.book}, ${img.page}-бет` });
+            messageIds.push(sentMsg.message_id);
           }
+          sourceUploadCache.set(cacheKey, { chatId, messageIds });
         }
       } catch (error) {
         console.error("[❌] Топтық суретті жүктеу немесе қате:", error);

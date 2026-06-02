@@ -35,14 +35,36 @@ const SYSTEM_PROMPT = `1. ПЕРСОНА (Кейіпкер):
 • АВТОМАТТЫ КӨШІРУ (Auto-Copy): Құран аяттарының арабшасын, дұғалардың транскрипциясын немесе жаттап алуға қажетті нақты дұға мәтіндерін міндетті түрде <code>...</code> тегіне ал! (Мысалы: <code>Субханаллаһ</code>).
 • ЖАСЫРЫН МӘТІНДЕР (Spoiler): Егер сұрақ немесе жауапта ерлі-зайыптылар қатынасы, ғұсыл, әурет, хайыз/нифас секілді сезімтал немесе ұятты тақырыптар қозғалса, сол жауаптың ашық детальдарын міндетті түрде <tg-spoiler>...</tg-spoiler> тегіне орап жібер.
 • Telegram қолдамайтын <br>, <p> тегтерін МҮЛДЕМ қолданба! Жаңа жолға түсу үшін тек табиғи жаңа жол таңбасын (enter) қолдан!
-• Текстті ұзын етіп айнадай көшірме, сауатты қорытып жаз.`;
+• Текстті ұзын етіп айнадай көшірме, сауатты қорытып жаз.
+
+6. КӨПТІЛДІ ДІНИ ӘДЕП (Multilingual Islamic Adab):
+Қасиетті есімдер мен дұғаларды жазу ережесі: Тұлғалардың есімдерін атағанда ешқашан (с.а.с), (р.а), (а.с), pbuh, ﷺ сияқты қысқартуларды немесе арабша символдарды қолданба. Оның орнына жауап қай тілде беріліп жатса, сол тілдің дәстүріне сай толық сөйлеммен дұға тіркестерін ЖАҚШАҒА АЛЫП (enclosed in parentheses), міндетті түрде көлбеу <i>(...)</i> тегінің ішіне алып қолдан!
+Мысал ретінде (бірақ басқа тілдерде де осы мағынаны сақта):
+1. Пайғамбарымыз Мұхаммед аталғанда:
+  - Қазақша: «<i>(Алланың оған игілігі мен сәлемі болсын)</i>»
+  - Орысша: «<i>(мир ему и благословение Аллаха)</i>»
+  - Ағылшынша: «<i>(peace and blessings of Allah be upon him)</i>»
+2. Басқа пайғамбарлар аталғанда:
+  - Қазақша: «<i>(Алланың оған сәлемі болсын)</i>»
+  - Орысша: «<i>(мир ему)</i>»
+3. Сахабалар (ер/әйел/көпше) аталғанда:
+  - Қазақша: «<i>(Алла одан/олардан разы болсын)</i>»
+  - Орысша: «<i>(да будет доволен им/ею/ими Аллах)</i>»
+4. Ғалымдар мен Табиғиндер (мысалы, Имам Ағзам Әбу Ханифа) аталғанда:
+  - Қазақша: «<i>(Алла оны рақымына алсын)</i>»
+  - Орысша: «<i>(да помилует его Аллах)</i>»
+Бұл тіркестер мәтін ішінде жасанды емес, сол тілде сөйлейтін мейірімді ұстаздың сөйлеу мәнеріне сай өте табиғи әрі көлбеу <i>(...)</i> тегтеріне оралып оқылуы тиіс.`;
 
 const CHITCHAT_SYSTEM_PROMPT = `Сен — Daraq, білімді, мейірімді әрі салмақты Ханафи мазһабының виртуалды ұстазысың. 
 Пайдаланушы қазір саған қарапайым сәлемдесу, алғыс айту немесе қысқаша тілдесу жазды.
 Мақсатың: Жылы, қысқа әрі мейірімді түрде жауап қайтару.
 
 ЕШҚАНДАЙ бөтен тегтерді (<thought> т.б.) қолданба! Тек қана қарапайым сөйлеммен жылы жауап қайтар.
-Таза Telegram HTML тегтерін қолдануға болады: <b> (жуан), <i> (көлбеу).`;
+Таза Telegram HTML тегтерін қолдануға болады: <b> (жуан), <i> (көлбеу), <blockquote> (дәйексөз).
+
+Маңызды безендіру ережесі:
+- Егер әңгіме немесе диалог барысында Құран аяты, Хадис немесе белгілі тұлғалардың тікелей цитаталары (сөздері) келтірілсе, жай әңгіме (Chitchat) болса да, оны міндетті түрде HTML-дің <blockquote>...</blockquote> тегінің ішіне ал!
+- Діни әдеп тіркестерін (мысалы, пайғамбарымыз аталғанда) міндетті түрде жақшаға алып, көлбеу <i>(...)</i> тегіне бұйырт (мысалы: <i>(оған Алланың игілігі мен сәлемі болсын)</i>).`;
 
 async function classifyIntent(query: string, history: {role: string, parts: any[]}[]): Promise<'CHITCHAT' | 'KNOWLEDGE_SEARCH'> {
   const clean = query.trim().toLowerCase();
@@ -96,6 +118,7 @@ async function classifyIntent(query: string, history: {role: string, parts: any[
 export interface AnswerResult {
   answer: string;
   sources: SearchResult[];
+  intent?: string;
 }
 
 /**
@@ -131,19 +154,68 @@ async function getChatHistory(chatId: string, threadId?: string | number) {
 /**
  * Хабарламаларды Firestore-ға сақтау
  */
-async function saveToChatHistory(chatId: string, role: 'user' | 'bot', text: string, threadId?: string | number) {
+export async function rewindHistory(chatId: string, threadId: string | number | undefined, targetMsgId: number, newText: string): Promise<{deletedMsgIds: number[], updatedUserQuery: boolean}> {
+  const result = { deletedMsgIds: [] as number[], updatedUserQuery: false };
+  if (!db) return result;
+  try {
+    const threadStr = (threadId !== undefined && threadId !== null) ? String(threadId) : 'general';
+    const msgRef = db.collection('users').doc(chatId).collection('topics').doc(threadStr).collection('messages');
+    
+    // First, try to find the message by msgId
+    let snapshot = await msgRef.where('msgId', '==', targetMsgId).get();
+    
+    // Fallback: If not found, it might be an older message without msgId. 
+    // We can try to clean up by just deleting the last bot message and keeping the history loose,
+    // but the safest approach for guaranteed overwrite is to find the user message just before the bot message
+    // Since we don't know the bot message either, we rely on the msgId for new messages.
+    // If it's empty and we can't find it, we will just return.
+    
+    if (snapshot.empty) {
+      console.log(`[⚠️] Cannot rewind history, message ID ${targetMsgId} not found in Firestore. Older message format?`);
+      // Since we can't find the exact target, we can't overwrite it. We'll return empty.
+      return result;
+    }
+    
+    const targetDoc = snapshot.docs[0];
+    const targetTimestamp = targetDoc.data().timestamp;
+
+    // We want to delete everything strictly AFTER this user message
+    const toDelete = await msgRef.where('timestamp', '>', targetTimestamp).get();
+    
+    const batch = db.batch();
+    toDelete.forEach((doc) => {
+      batch.delete(doc.ref);
+      const mId = doc.data().msgId;
+      if (mId && typeof mId === 'number') {
+         result.deletedMsgIds.push(mId);
+      }
+    });
+
+    // OVERWRITE the user message query per user's explicit request
+    batch.update(targetDoc.ref, { text: newText });
+
+    await batch.commit();
+    result.updatedUserQuery = true;
+    console.log(`[✅] Rewound history: Updated target message ${targetMsgId} and deleted ${toDelete.size} subsequent messages`);
+  } catch(e) {
+    console.error("[❌] Error rewinding history:", e);
+  }
+  return result;
+}
+
+export async function saveToChatHistory(chatId: string, role: 'user' | 'bot', text: string, threadId?: string | number, msgId?: number, replyToMsgId?: number) {
   if (!db) return;
   try {
     const threadStr = (threadId !== undefined && threadId !== null) ? String(threadId) : 'general';
-    await db.collection('users').doc(chatId).collection('topics').doc(threadStr).collection('messages').add({
-      role,
-      text,
-      timestamp: new Date()
-    });
+    const payload: any = { role, text, timestamp: new Date() };
+    if (msgId) payload.msgId = msgId;
+    if (replyToMsgId) payload.replyToMsgId = replyToMsgId;
+    await db.collection('users').doc(chatId).collection('topics').doc(threadStr).collection('messages').add(payload);
   } catch (error) {
     console.error("[❌] Хабарламаны сақтау кезінде қате орын алды (Firestore Error):", error);
   }
 }
+
 
 function isAskingForProof(q: string): boolean {
   const clean = q.toLowerCase();
@@ -208,7 +280,9 @@ export async function generateAgentAnswerStream(
   onChunk: (currentFullText: string) => void,
   onAction: (statusText: string) => void,
   threadId?: string | number,
-  userLanguage?: string
+  userLanguage?: string,
+  abortSignal?: AbortSignal,
+  skipHistorySave?: boolean
 ): Promise<AnswerResult> {
   console.log(`\n[🤖] Бір кезеңді RAG жауап беру басталды (ChatID: ${chatId})`);
   
@@ -244,6 +318,13 @@ export async function generateAgentAnswerStream(
     ]);
 
     // Тарихты форматтау
+    if (rawHistory.length > 0) {
+        const lastMsg = rawHistory[rawHistory.length - 1];
+        if (lastMsg.role === 'user' && lastMsg.parts[0].text === query) {
+             rawHistory.pop();
+        }
+    }
+
     const history: {role: string, parts: any[]}[] = [];
     for (const msg of rawHistory) {
         if (history.length === 0) {
@@ -266,13 +347,14 @@ export async function generateAgentAnswerStream(
         const dayOfWeekC = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Almaty" })).getDay();
         const fastCachePrompt = `Сен — Daraq, Ханафи мазһабының виртуалды ұстазысың. Пайдаланушы қойған сұраққа бұрын жауап берілген. Төмендегі дайын жауаптың мағынасын сақтай отырып, оны пайдаланушы үшін жаңадан, жылы әрі табиғи етіп қайта құрастырып бер.
 Ережелер:
-1. ТЕК ҚАНА HTML тегтерін қолдан: <b> жуан сөздер үшін.
-2. Маркдаун белгілерін (мысалы, *, **) МҮЛДЕМ ҚОЛДАНБА. Тізімдер үшін қарапайым минус (-) сызықшасын қолдан.
+1. HTML ТЕГТЕРІН ҚОЛДАН: <b> (жуан мәтін), <i> (көлбеу мәтін), <blockquote> (дәйексөздер). Ескі жауаптағы Құран аяттарының аудармаларын, Хадистерді немесе ғалымдардың/кітаптардың тікелей үзінділерін («кітапта жазылған үзінділер») тауып, оларды міндетті түрде <blockquote>...</blockquote> тегтерінің ішіне ал! Ескі жауапта бұрыннан бар <blockquote>...</blockquote> дәйексөз форматтауларын мүлтіксіз сақтап, қайта құрастырғанда да дәйексөз ретінде қалдыр.
+2. Маркдаун белгілерін (мысалы, *, **) МҮЛДЕМ ҚОЛДАНБА. Тізімдер үшін қарапайым минус (-) сызықшасын немесе • (нүкте) таңбасын қолдан.
 3. Мәтін тым тығыз болмауы үшін абзацтар арасына кішігірім бос орын (жаңа жол) қалдыр.
 4. "Бұл туралы толық мәліметті... төмендегі батырманы басып..." деген сияқты БАТЫРМАҒА сілтейтін сөздерді АЛЫП ТАСТА, өйткені батырманы жүйе өзі қосады. Жай ғана жауаптың өзін әдемілеп бер.
-${userLanguage?.startsWith('ru') ? '5. ⚠️ ПЕРЕВОД: Обязательно переведи и дай ответ на РУССКОМ языке.' : ''}
-${userLanguage?.startsWith('en') ? '5. ⚠️ TRANSLATION: Must translate and reply in ENGLISH.' : ''}
-${dayOfWeekC === 5 ? '6. ⚠️ БҮГІН ЖҰМА: Бұл қасиетті Жұма күні. Жауабыңа «Жұма мүбәрак болсын! 🎊» мағынасындағы құттықтауды қос.' : ''}
+5. КӨПТІЛДІ ДІНИ ӘДЕП (Multilingual Islamic Adab): ЕШҚАШАН (с.а.с), (р.а), (а.с), pbuh, ﷺ сияқты қысқартуларды/символдарды қолданбау. Толыққанды мадақ-дұғаларды ЖАҚШАҒА АЛЫП (мысалы: "<i>(Алланың оған игілігі мен сәлемі болсын)</i>" немесе "<i>(мир ему и благословение Аллаха)</i>") тілге бейімдеп, міндетті түрде <i>(...)</i> (көлбеу және жақша ішінде) тегінің ішіне толық жаз.
+${userLanguage?.startsWith('ru') ? '6. ⚠️ ПЕРЕВОД: Обязательно переведи и дай ответ на РУССКОМ языке.' : ''}
+${userLanguage?.startsWith('en') ? '6. ⚠️ TRANSLATION: Must translate and reply in ENGLISH.' : ''}
+${dayOfWeekC === 5 ? '7. ⚠️ БҮГІН ЖҰМА: Бұл қасиетті Жұма күні. Жауабыңа «Жұма мүбәрак болсын! 🎊» мағынасындағы құттықтауды қос.' : ''}
 
 Ескі жауап:
 """
@@ -304,7 +386,8 @@ ${hit.answer}
 
         return {
             answer: fastAnswerText,
-            sources: hit.sources
+            sources: hit.sources,
+            intent: 'KNOWLEDGE_SEARCH'
         };
     }
 
@@ -362,7 +445,8 @@ ${hit.answer}
 
         return {
            answer: answerText,
-           sources: []
+           sources: [],
+           intent: 'CHITCHAT'
         };
     }
 
@@ -515,6 +599,10 @@ ${contextText}
 
     let answerText = "";
     for await (const chunk of responseStream) {
+      if (abortSignal?.aborted) {
+         console.log(`[🛑] RAG Streaming interrupted by abort signal (User edited message)`);
+         throw new Error("AbortError");
+      }
       if (chunk.text) {
         answerText += chunk.text;
         onChunk(answerText);
@@ -530,19 +618,26 @@ ${contextText}
 
     console.log(`[✅] Жылдам RAG жауабы толығымен аяқталды.`);
     
-    await saveToChatHistory(chatId, 'user', query, threadId); 
-    await saveToChatHistory(chatId, 'bot', answerText, threadId);
+    if (!skipHistorySave) {
+       await saveToChatHistory(chatId, 'user', query, threadId); 
+       await saveToChatHistory(chatId, 'bot', answerText, threadId);
+    }
 
     return {
       answer: answerText,
-      sources: usedSources
+      sources: usedSources,
+      intent: 'KNOWLEDGE_SEARCH'
     };
 
   } catch (error: any) {
+    if (error?.message === 'AbortError') {
+       throw error;
+    }
     console.error("\n[❌] Жылдам RAG жауап алу барысында қателік орын алды:", error?.message || error);
     return {
        answer: "⚠️ Кешіріңіз, жүйелік қатеге байланысты жауап бере алмаймын.",
-       sources: []
+       sources: [],
+       intent: 'CHITCHAT'
     };
   }
 }

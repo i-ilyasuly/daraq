@@ -18,8 +18,9 @@
   },
   "dependencies": {
     "@google-cloud/storage": "^7.19.0",
+    "@google-cloud/text-to-speech": "^6.4.1",
     "@google-cloud/vision": "^5.3.6",
-    "@google/genai": "^1.29.0",
+    "@google/genai": "^2.8.0",
     "@qdrant/js-client-rest": "^1.18.0",
     "@tailwindcss/vite": "^4.1.14",
     "@vitejs/plugin-react": "^5.0.4",

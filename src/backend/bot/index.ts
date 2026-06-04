@@ -8,98 +8,22 @@ import { searchAnswers } from '../rag/searchService';
 import { generateAgentAnswerStream, saveToChatHistory, rewindHistory } from '../rag/aiService';
 import { ai } from '../rag/aiClient';
 import { db } from '../db/firestore';
+import { getVoiceResponse } from '../rag/voiceAgent';
 
 const storage = customStorage || new Storage();
 // Fallback for dev: if you don't set it, it'll try this name
 const PROCESSED_BUCKET = process.env.PROCESSED_IMAGES_BUCKET || 'daraq-497018-daraq-processed-images';
 
-interface SourceInfo {
-  book: string;
-  page: number;
-  pages?: number[];
-  imageUrl: string;
-  targetText?: string;
-  query?: string;
-}
+import {
+  SourceInfo, ongoingStreams, userToBotMsgMap, sourceUploadCache,
+  getSourceInfo, setSourceInfo, getGroupInfo, setGroupInfo,
+  PaginationState, paginationCache, renamedTopicsCache, pendingSourcesCache,
+  sourceCache, groupCache
+} from './botCache';
 
-// Memory tracking for stream aborts and message mapping
-export const ongoingStreams = new Map<string, AbortController>();
-export const userToBotMsgMap = new Map<string, number>();
-export const sourceUploadCache = new Map<string, { chatId: string, messageIds: number[] }>();
-
-// ... original cache map
-const sourceCache = new Map<string, SourceInfo>();
-const groupCache = new Map<string, SourceInfo[]>();
-
-/**
- * Firestore-бағытталған кэшті қолдау үшін көмекші функциялар (Stateless контейнерде жоғалмауы үшін)
- */
-export async function getSourceInfo(id: string): Promise<SourceInfo | undefined> {
-  const mem = sourceCache.get(id);
-  if (mem) return mem;
-
-  if (db) {
-    try {
-      const doc = await db.collection('sourceCache').doc(id).get();
-      if (doc.exists) {
-        const data = doc.data() as SourceInfo;
-        sourceCache.set(id, data);
-        return data;
-      }
-    } catch (e) {
-      console.error('[⚠️] Error retrieving from Firestore sourceCache:', e);
-    }
-  }
-  return undefined;
-}
-
-export function setSourceInfo(id: string, info: SourceInfo): void {
-  sourceCache.set(id, info);
-  if (db) {
-    db.collection('sourceCache').doc(id).set(info).catch(e => {
-      console.error('[⚠️] Error saving to Firestore sourceCache:', e);
-    });
-  }
-}
-
-export async function getGroupInfo(id: string): Promise<SourceInfo[] | undefined> {
-  const mem = groupCache.get(id);
-  if (mem) return mem;
-
-  if (db) {
-    try {
-      const doc = await db.collection('groupCache').doc(id).get();
-      if (doc.exists) {
-        const data = (doc.data() as { sources: SourceInfo[] }).sources;
-        groupCache.set(id, data);
-        return data;
-      }
-    } catch (e) {
-      console.error('[⚠️] Error retrieving from Firestore groupCache:', e);
-    }
-  }
-  return undefined;
-}
-
-export function setGroupInfo(id: string, sources: SourceInfo[]): void {
-  groupCache.set(id, sources);
-  if (db) {
-    db.collection('groupCache').doc(id).set({ sources }).catch(e => {
-      console.error('[⚠️] Error saving to Firestore groupCache:', e);
-    });
-  }
-}
-
-interface PaginationState {
-  quranSources: any[];
-  bookSources: any[];
-  quranPageIndex: number;
-  query?: string;
-}
-
-const paginationCache = new Map<string, PaginationState>();
-export const renamedTopicsCache = new Set<string>();
-const pendingSourcesCache = new Map<string, any>();
+import {
+  getCustomEmojiMap, EMOJI_FALLBACKS, extractEmojiAndText
+} from './emojiService';
 
 export function processAndDeduplicateSources(rawSources: any[], answerText?: string): { quranSources: any[]; bookSources: any[] } {
   if (!rawSources || rawSources.length === 0) {
@@ -259,6 +183,9 @@ export function buildKeyboard(quranSources: any[], bookSources: any[], quranPage
       }
     }
   }
+
+  // Дауыстық жауап батырмасын қосу
+  buttons.push([Markup.button.callback('🎤 Дыбыстық жауап', 'voice_resp')]);
 
   if (buttons.length === 0) return null;
   return Markup.inlineKeyboard(buttons);
@@ -483,10 +410,29 @@ export function setupBot() {
     try {
       await ctx.reply('⏳ "Ораза" және "Намаз" темаларын құру басталуда...');
       
-      // Намаз тақырыбы (жеке чатқа бағыттауымыз мүмкін)
-      const namazTopic = await ctx.telegram.createForumTopic(chatId, 'Намаз');
-      // Ораза тақырыбы (жеке чатқа бағыттауымыз мүмкін)
-      const orazaTopic = await ctx.telegram.createForumTopic(chatId, 'Ораза');
+      const emojiMap = await getCustomEmojiMap(ctx.telegram);
+      
+      // Намаз (Mosque icon fallback to house if not exists)
+      let namazEmojiId = emojiMap.get('🕌');
+      if (!namazEmojiId) namazEmojiId = emojiMap.get('🏠');
+      
+      // Ораза (Moon fallback to star if not exists)
+      let orazaEmojiId = emojiMap.get('🌙');
+      if (!orazaEmojiId) orazaEmojiId = emojiMap.get('⭐️');
+
+      // Намаз тақырыбы
+      const namazTopic = await ctx.telegram.createForumTopic(
+        chatId, 
+        namazEmojiId ? 'Намаз' : '🕌 Намаз', 
+        namazEmojiId ? { icon_custom_emoji_id: namazEmojiId } : undefined
+      );
+
+      // Ораза тақырыбы
+      const orazaTopic = await ctx.telegram.createForumTopic(
+        chatId, 
+        orazaEmojiId ? 'Ораза' : '🌙 Ораза', 
+        orazaEmojiId ? { icon_custom_emoji_id: orazaEmojiId } : undefined
+      );
 
       return ctx.replyWithHTML(
         `✅ Темалар сәтті құрылды!\n\n` +
@@ -503,7 +449,13 @@ export function setupBot() {
   bot.command('newtopic', async (ctx) => {
     const chatId = ctx.from.id;
     try {
-      const topic = await ctx.telegram.createForumTopic(chatId, 'Жаңа тақырып');
+      const emojiMap = await getCustomEmojiMap(ctx.telegram);
+      const brainId = emojiMap.get('🧠');
+      const topic = await ctx.telegram.createForumTopic(
+        chatId, 
+        brainId ? 'Жаңа тақырып' : '🧠 Жаңа тақырып',
+        brainId ? { icon_custom_emoji_id: brainId } : undefined
+      );
       await ctx.reply(`✅ Жаңа топик құрылды! Thread ID: ${topic.message_thread_id}. Енді сол жерге жазыңыз.`);
     } catch (e: any) {
       await ctx.reply(`❌ Жаңа топик құру мүмкін болмады: ${e.message}`);
@@ -744,9 +696,9 @@ export function setupBot() {
 
 ҚАТАҢ ЕРЕЖЕЛЕР:
 1. ҰЗЫНДЫҒЫ: Атау қатаң түрде тек 2-3 сөзден ғана тұруы керек.
-2. ФОРМАТЫ: Сұраулы сөйлем немесе етістік қолданба (мысалы: "Ораза қалай ұстайды?" немесе "Намаз қалай оқылады?" деп жазуға МҮЛДЕМ ТЫЙЫМ САЛЫНАДЫ). Оның орнына тек зат есіммен немесе атау тұлғасында жаз (мысалы: "Ораза ұстау тәртібі" немесе "Сапардағы намаз").
-3. ТАЗАЛЫҚ: Ешқандай тырнақша ("...", '...'), нүкте (.), үтір, сұрақ белгісі немесе басқа тыныс белгілерін мүлдем қолданба.
-4. ДИЗАЙН: Тақырып атауының ең басына тақырыпқа сәйкес келетін ТЕК 1 эмодзи қос (мысалы: 🚗 немесе 🚭).
+2. ФОРМАТЫ: Сұраулы сөйлем немесе етістік қолданба. Тек зат есіммен немесе атау тұлғасында жаз (мысалы: "Ораза ұстау тәртібі" немесе "Сапардағы намаз").
+3. ТАЗАЛЫҚ: Ешқандай тырнақша, нүкте, үтір, сұрақ белгісін қолданба.
+4. ДИЗАЙН: Тақырып атауының ең басына тақырыпқа сәйкес келетін ТЕК 1 эмодзи қос (мысалы: 📚, 🚗, 💡, 📝). Егер тақырыпқа сай PREMIUM иконка таппасаң, жай ғана тақырыпқа сай эмодзи қой, жүйе өзі реттейді.
 5. ТІЛ: Тек қазақ тілінде жаз.
 
 ҮЛГІ (Few-Shot Examples):
@@ -790,14 +742,50 @@ export function setupBot() {
             }
 
             if (newName) {
-              await ctx.telegram.editForumTopic(chatId, targetThreadId, { name: newName });
-              console.log(`[AI] Жеке чаттағы Топик аты өзгертілді: ${newName}`);
+              let cleanName = newName;
+              let customEmojiId: string | undefined = undefined;
+
+              const parsed = extractEmojiAndText(newName);
+              if (parsed.emoji) {
+                const emojiMap = await getCustomEmojiMap(ctx.telegram);
+                let matchedId = emojiMap.get(parsed.emoji);
+                
+                // Try fallback first if no direct match
+                if (!matchedId) {
+                  const fallbackEmoji = EMOJI_FALLBACKS[parsed.emoji];
+                  if (fallbackEmoji) {
+                    matchedId = emojiMap.get(fallbackEmoji);
+                  }
+                }
+
+                if (matchedId) {
+                  // Option 3 Path A: Valid Icon found
+                  // Use the ID for the icon and CLEAN text for the name
+                  customEmojiId = matchedId;
+                  cleanName = parsed.text || "Тақырып"; // Ensure text is not empty
+                  console.log(`[Stickers] Found match for ${parsed.emoji} -> ID ${matchedId}. Using clean title: "${cleanName}"`);
+                } else {
+                  // Option 3 Path B: No valid icon for this emoji
+                  // Keep the emoji in the text title, icon will remain default
+                  cleanName = newName;
+                  customEmojiId = undefined;
+                  console.log(`[Stickers] No match for ${parsed.emoji}. Keeping emoji in text: "${cleanName}"`);
+                }
+              }
+
+              const editOptions: any = { name: cleanName };
+              if (customEmojiId) {
+                editOptions.icon_custom_emoji_id = customEmojiId;
+              }
+
+              await ctx.telegram.editForumTopic(chatId, targetThreadId, editOptions);
+              console.log(`[AI] Жеке чаттағы Топик аты өзгертілді: "${cleanName}", эмодзи ID: ${customEmojiId || 'none'}`);
               
               if (db) {
                 const threadStr = String(targetThreadId);
                 await db.collection('users').doc(chatId).collection('topics').doc(threadStr).set({
                   renamed: true,
-                  title: newName,
+                  title: cleanName,
                   updatedAt: new Date()
                 }, { merge: true });
               }
@@ -1048,6 +1036,50 @@ export function setupBot() {
            return;
         }
         console.error("[❌] Error processing edited message:", err);
+    }
+  });
+
+  bot.action('voice_resp', async (ctx) => {
+    try {
+      try {
+        await ctx.answerCbQuery("⏳ Дыбыс жасалуда...", { show_alert: false });
+      } catch (e) {
+        console.warn("[VoiceAgent] Ignore answerCbQuery error:", e);
+      }
+
+      if (!ctx.callbackQuery.message) {
+        throw new Error("No message attached to callback query.");
+      }
+
+      const msg = ctx.callbackQuery.message as any;
+      const messageId = msg.message_id;
+      const originalText = msg.text || msg.caption || "";
+
+      if (!originalText) {
+        return ctx.reply("❌ Кешіріңіз, дыбыстауға арналған мәтін табылмады.");
+      }
+
+      await ctx.telegram.sendChatAction(ctx.chat!.id, 'record_voice', { message_thread_id: ctx.callbackQuery.message.message_thread_id });
+
+      const { audioBuffer } = await getVoiceResponse(messageId, originalText);
+
+      await ctx.telegram.sendVoice(ctx.chat!.id, { source: audioBuffer, filename: 'voice.ogg' }, { 
+        reply_parameters: { message_id: messageId },
+        message_thread_id: ctx.callbackQuery.message.message_thread_id
+      });
+
+    } catch (error: any) {
+      console.error("[VoiceAgent] Error generating voice response:", error, error.response?.data || "");
+      let errorMessage = "❌ Дыбыс қызметі уақытша қолжетімді емес.";
+      if (error?.status === 429 || error?.message?.includes("429") || error?.message?.includes("quota")) {
+        errorMessage = "❌ Дыбыстау қызметінің лимиті таусылды. Біраз уақыттан соң қайталап көріңіз.";
+      } else {
+        errorMessage += ` (Қате: ${error.message})`;
+      }
+      
+      await ctx.reply(errorMessage, { 
+        reply_parameters: { message_id: ctx.callbackQuery?.message?.message_id } 
+      }).catch(e => console.error("Error sending failure reply:", e));
     }
   });
 

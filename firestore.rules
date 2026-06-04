@@ -1,0 +1,125 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && (request.auth.token.email_verified == true || request.auth.token.firebase.sign_in_provider == 'telegram');
+    }
+
+    function isAdmin() {
+      return isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Entity validation functions (anti-update-gap)
+    function isValidSourceCache(data) {
+      return data.keys().hasAll(['text', 'book', 'page']) 
+        && data.text is string && data.text.size() <= 10000
+        && data.book is string && data.book.size() <= 200
+        && data.page is int && data.page >= 1
+        && (!data.keys().hasAny(['imageUrl']) || (data.imageUrl is string && data.imageUrl.size() <= 1000));
+    }
+
+    function isValidGroupCache(data) {
+      return data.keys().hasAll(['sources'])
+        && data.sources is list
+        && data.sources.size() <= 50;
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['id'])
+        && data.id is string && data.id.size() <= 128;
+    }
+
+    function isValidTopic(data) {
+      return data.keys().hasAll(['renamed', 'title', 'updatedAt'])
+        && data.renamed is bool
+        && data.title is string && data.title.size() <= 250
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidMessage(data) {
+      return data.keys().hasAll(['role', 'text', 'timestamp'])
+        && (data.role == 'user' || data.role == 'bot')
+        && data.text is string && data.text.size() <= 10000
+        && data.timestamp is timestamp
+        && (!data.keys().hasAny(['msgId']) || data.msgId is int)
+        && (!data.keys().hasAny(['replyToMsgId']) || data.replyToMsgId is int);
+    }
+
+    function isValidLatestSources(data) {
+      return data.keys().hasAll(['sources'])
+        && data.sources is list
+        && data.sources.size() <= 20;
+    }
+
+    // Rules matching individual paths
+
+    match /sourceCache/{cacheId} {
+      allow get: if isSignedIn() && isValidId(cacheId);
+      allow list: if isSignedIn();
+      allow create, update: if isAdmin() && isValidId(cacheId) && isValidSourceCache(request.resource.data);
+      allow delete: if isAdmin() && isValidId(cacheId);
+    }
+
+    match /groupCache/{cacheId} {
+      allow get: if isSignedIn() && isValidId(cacheId);
+      allow list: if isSignedIn();
+      allow create, update: if isAdmin() && isValidId(cacheId) && isValidGroupCache(request.resource.data);
+      allow delete: if isAdmin() && isValidId(cacheId);
+    }
+
+    match /users/{chatId} {
+      allow get: if isOwner(chatId) && isValidId(chatId);
+      allow create: if isOwner(chatId) && isVerifiedUser() && isValidId(chatId) && isValidUser(request.resource.data) && request.resource.data.keys().size() == 1;
+      allow update: if isOwner(chatId) && isVerifiedUser() && isValidId(chatId) && isValidUser(request.resource.data) && (
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['id'])
+      );
+      allow delete: if isOwner(chatId) && isValidId(chatId);
+
+      match /topics/{threadStr} {
+        allow get: if isOwner(chatId) && isValidId(threadStr);
+        allow list: if isOwner(chatId);
+        allow create: if isOwner(chatId) && isVerifiedUser() && isValidId(threadStr) && isValidTopic(request.resource.data) && request.resource.data.keys().size() == 3;
+        allow update: if isOwner(chatId) && isVerifiedUser() && isValidId(threadStr) && isValidTopic(request.resource.data) && (
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['title', 'renamed', 'updatedAt'])
+        );
+        allow delete: if isOwner(chatId) && isValidId(threadStr);
+
+        match /messages/{messageId} {
+          allow get: if isOwner(chatId) && isValidId(messageId);
+          allow list: if isOwner(chatId);
+          allow create: if isOwner(chatId) && isVerifiedUser() && isValidId(messageId) && isValidMessage(request.resource.data);
+          allow update: if isOwner(chatId) && isVerifiedUser() && isValidId(messageId) && isValidMessage(request.resource.data) && (
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['text', 'timestamp'])
+          );
+          allow delete: if isOwner(chatId) && isValidId(messageId);
+        }
+
+        match /latestSources/{sourceId} {
+          allow get: if isOwner(chatId) && isValidId(sourceId);
+          allow list: if isOwner(chatId);
+          allow create, update: if isOwner(chatId) && isVerifiedUser() && isValidId(sourceId) && isValidLatestSources(request.resource.data);
+          allow delete: if isOwner(chatId) && isValidId(sourceId);
+        }
+      }
+    }
+  }
+}

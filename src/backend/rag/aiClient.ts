@@ -100,6 +100,7 @@ if (hasServiceAccountFile) {
 
 // Export the primary client name expected by external code
 export const ai = aiStudio;
+export const vertexAiClient = vertexAi;
 
 // --- Dual-Resolver Monkey Patching for Maximum Resilience ---
 const originalGenerateContent = aiStudio.models.generateContent.bind(aiStudio.models);

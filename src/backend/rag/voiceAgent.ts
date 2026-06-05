@@ -52,8 +52,8 @@ ${text}`;
   for (const step of interaction.steps) {
     if (step.type === 'model_output') {
       const textContent = step.content?.find((c: any) => c.type === 'text');
-      if (textContent && textContent.text) {
-        transcript += textContent.text;
+      if (textContent && (textContent as any).text) {
+        transcript += (textContent as any).text;
       }
     }
   }
@@ -124,8 +124,8 @@ export async function getVoiceResponse(messageId: number, originalText: string):
     for (const step of ttsInteraction.steps) {
       if (step.type === 'model_output') {
         const audioContent = step.content?.find((c: any) => c.type === 'audio');
-        if (audioContent && audioContent.data) {
-          audioBuffer = Buffer.from(audioContent.data, 'base64');
+        if (audioContent && (audioContent as any).data) {
+          audioBuffer = Buffer.from((audioContent as any).data, 'base64');
         }
       }
     }

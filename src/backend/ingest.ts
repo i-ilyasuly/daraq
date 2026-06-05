@@ -153,8 +153,6 @@ export async function ingestBook(filePath: string, bookName: string) {
       }
     }
 
-    let chunks: { text: string; pages: number[] }[] = [];
-
     let concatenatedText = "";
     const offsetMap: { page: number; start: number; end: number }[] = [];
 
@@ -184,38 +182,70 @@ export async function ingestBook(filePath: string, bookName: string) {
       });
     }
 
+    const PARENT_WORDS = 800;
+    const PARENT_OVERLAP = 100;
+    const CHILD_WORDS = 150;
+    const CHILD_OVERLAP = 30;
+
+    interface LocalChunk {
+      text: string;
+      pages: number[];
+      start: number;
+      end: number;
+    }
+
+    const parentChunks: LocalChunk[] = [];
     if (words.length > 0) {
-      const wordsPerChunk = 300;
-      const overlap = 50;
-      const step = wordsPerChunk - overlap > 0 ? wordsPerChunk - overlap : wordsPerChunk;
-
-      for (let i = 0; i < words.length; i += step) {
-        const chunkWords = words.slice(i, i + wordsPerChunk);
+      const stepParent = PARENT_WORDS - PARENT_OVERLAP > 0 ? PARENT_WORDS - PARENT_OVERLAP : PARENT_WORDS;
+      for (let i = 0; i < words.length; i += stepParent) {
+        const chunkWords = words.slice(i, i + PARENT_WORDS);
         if (chunkWords.length === 0) break;
-
         const startChar = chunkWords[0].start;
         const endChar = chunkWords[chunkWords.length - 1].end;
         const chunkText = concatenatedText.substring(startChar, endChar);
-
         if (chunkText.trim().length > 10) {
           const chunkPages: number[] = [];
           for (const entry of offsetMap) {
-            // Overlap check: entry.start < endChar AND entry.end > startChar
             if (entry.start < endChar && entry.end > startChar) {
               chunkPages.push(entry.page);
             }
           }
-          if (chunkPages.length === 0) {
-            chunkPages.push(1);
-          }
-          chunks.push({ text: chunkText.trim(), pages: chunkPages });
+          if (chunkPages.length === 0) chunkPages.push(1);
+          parentChunks.push({ text: chunkText.trim(), pages: chunkPages, start: startChar, end: endChar });
         }
-
-        if (i + wordsPerChunk >= words.length) {
-          break;
-        }
+        if (i + PARENT_WORDS >= words.length) break;
       }
     }
+
+    const childChunks: { text: string; pages: number[]; parentText: string }[] = [];
+    if (words.length > 0) {
+      const stepChild = CHILD_WORDS - CHILD_OVERLAP > 0 ? CHILD_WORDS - CHILD_OVERLAP : CHILD_WORDS;
+      for (let i = 0; i < words.length; i += stepChild) {
+        const chunkWords = words.slice(i, i + CHILD_WORDS);
+        if (chunkWords.length === 0) break;
+        const startChar = chunkWords[0].start;
+        const endChar = chunkWords[chunkWords.length - 1].end;
+        const chunkText = concatenatedText.substring(startChar, endChar);
+        
+        if (chunkText.trim().length > 10) {
+          const chunkPages: number[] = [];
+          for (const entry of offsetMap) {
+            if (entry.start < endChar && entry.end > startChar) {
+              chunkPages.push(entry.page);
+            }
+          }
+          if (chunkPages.length === 0) chunkPages.push(1);
+
+          const childCenter = startChar + (endChar - startChar) / 2;
+          const parent = parentChunks.find(p => p.start <= childCenter && childCenter <= p.end) || parentChunks[0] || { text: chunkText.trim() };
+
+          childChunks.push({ text: chunkText.trim(), pages: chunkPages, parentText: parent.text });
+        }
+        if (i + CHILD_WORDS >= words.length) break;
+      }
+    }
+
+    let chunks = childChunks;
 
     // Qdrant коллекциясын тексереміз және Hybrid Search дайындаймыз
     if (qdrant) {
@@ -265,7 +295,7 @@ export async function ingestBook(filePath: string, bookName: string) {
 
     console.log(`[3] Векторлау (Embeddings & Sparse) және [4] Сақтау...`);
     for (let i = 0; i < chunks.length; i++) {
-      const { text: chunkText, pages: chunkPages } = chunks[i];
+      const { text: chunkText, pages: chunkPages, parentText } = chunks[i];
       const pageNumber = chunkPages[0] || 1;
       await new Promise(res => setTimeout(res, 2200));
 
@@ -303,18 +333,26 @@ export async function ingestBook(filePath: string, bookName: string) {
         denseVector = [...denseVector, ...Array(1536 - denseVector.length).fill(0)];
       }
 
+      const chunkId = uuidv4();
+      
       // Sparse вектор жасау
-      const sparseVector = tokenizeAndHash(chunkText);
+      let sparseVector: { indices: number[], values: number[] } | undefined;
+      try {
+        sparseVector = tokenizeAndHash(chunkText);
+      } catch (e) {
+        console.warn(`[⚠️] Sparse вектор жасауда қате кетті, chunkId ${chunkId}:`, e);
+        sparseVector = { indices: [], values: [] };
+      }
 
       const safeBookName = bookName.replace(/[^a-zA-Zа-яА-Я0-9-_]/g, '_');
       const imageUrl = `https://storage.googleapis.com/${BUCKET_NAME}/${safeBookName}/page_${pageNumber}.png`;
 
-      const chunkId = uuidv4();
       const metadata = {
         book: bookName,
         page: pageNumber,
         pages: chunkPages,
         text: chunkText,
+        parentText: parentText,
         imageUrl,
         language: "kk",
         source_type: "primary_book",
@@ -322,15 +360,21 @@ export async function ingestBook(filePath: string, bookName: string) {
       };
 
       if (qdrant) {
+        // Егер sparseVector бос болса, vector ішінен алып тастаймыз немесе бос массив жібереміз
+        const vectorData: any = {
+          "": denseVector
+        };
+        
+        if (sparseVector && sparseVector.values.length > 0) {
+          vectorData["text_sparse"] = sparseVector;
+        }
+
         await qdrant.upsert(QDRANT_COLLECTION, {
           wait: true,
           points: [
             {
               id: chunkId,
-              vector: {
-                "": denseVector,
-                "text_sparse": sparseVector
-              },
+              vector: vectorData,
               payload: metadata
             }
           ]

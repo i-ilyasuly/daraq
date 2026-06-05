@@ -31,6 +31,9 @@ export async function checkCache(query: string): Promise<{ hit: CacheEntry | nul
       denseVector = [...denseVector, ...Array(768).fill(0)];
     }
 
+    // ВАҚЫТША КЭШ ӨШІРІЛГЕН
+    return { hit: null, vector: denseVector };
+
     // Ensure collection exists (lazy create) is not needed for search, it'll just fail gracefully
     const searchResult = await qdrant.search(CACHE_COLLECTION, {
       vector: denseVector,

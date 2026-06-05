@@ -20,9 +20,9 @@ async function run() {
   for (const step of ttsInteraction.steps) {
     if (step.type === 'model_output') {
       const audioContent = step.content?.find((c: any) => c.type === 'audio');
-      if (audioContent && audioContent.data) {
-        console.log("MimeType:", audioContent.mimeType);
-        const buffer = Buffer.from(audioContent.data, 'base64');
+      if (audioContent && (audioContent as any).data) {
+        console.log("MimeType:", (audioContent as any).mimeType);
+        const buffer = Buffer.from((audioContent as any).data, 'base64');
         fs.writeFileSync("output.raw", buffer);
         console.log("Saved output.raw size", buffer.length);
       }

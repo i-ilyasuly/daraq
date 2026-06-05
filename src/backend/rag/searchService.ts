@@ -8,6 +8,7 @@ const QDRANT_COLLECTION = 'daraq_books';
 // Қайтарылатын құрылым (Interface)
 export interface SearchResult {
   text: string;
+  parentText?: string;
   book: string;
   page: number;
   pages?: number[];
@@ -17,62 +18,97 @@ export interface SearchResult {
   url?: string;
 }
 
+import { GoogleAuth } from 'google-auth-library';
+
+const auth = new GoogleAuth({
+  scopes: ['https://www.googleapis.com/auth/cloud-platform'],
+});
+
 /**
- * Cohere Multilingual Rerank V3 арқылы іріктелген результаттарды қайта бағалау (Reranker)
+ * Google Cloud Vertex AI (Discovery Engine) Ranking API арқылы іріктелген нәтижелерді қайта бағалау (Reranker)
  */
 async function rerankResults(query: string, documents: SearchResult[]): Promise<SearchResult[]> {
-  const apiKey = process.env.COHERE_API_KEY;
-  if (!apiKey) {
-    console.warn("\n[⚠️] COHERE_API_KEY табылмады, Reranking қадамы өткізілді (Тікелей қайтару).");
-    return documents.slice(0, 5); // Fallback: Top-5
-  }
-
   if (documents.length === 0) return [];
 
   try {
-    console.log(`[⏳] Cohere Reranker арқылы (Multilingual V3) нәтижелерді қайта іріктеу (Rerank)...`);
-    // Extract purely text contents to send to Cohere
-    const docTexts = documents.map(doc => doc.text);
+    console.log(`[⏳] Vertex AI Reranker арқылы нәтижелерді қайта іріктеу (Rerank)...`);
+    
+    // Auth client configuration
+    const client = await auth.getClient();
+    const projectId = await auth.getProjectId();
+    const url = `https://discoveryengine.googleapis.com/v1alpha/projects/${projectId}/locations/global/rankingConfigs/default_config:rank`;
 
-    const response = await fetch('https://api.cohere.ai/v1/rerank', {
+    // Extract purely text contents to send to Vertex AI
+    // The Ranking API accepts records with {id, content}
+    const docTexts = documents.map((doc, index) => ({
+      id: String(index),
+      content: doc.text
+    }));
+
+    const response = await client.request({
+      url,
       method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-        'Accept': 'application/json'
-      },
-      body: JSON.stringify({
-        model: 'rerank-multilingual-v3.0',
+      data: {
         query: query,
-        documents: docTexts,
-        top_n: 5,
-        return_documents: false
-      })
+        records: docTexts,
+        ignoreRecordDetailsInResponse: false,
+        topN: 5
+      }
     });
 
-    if (!response.ok) {
-      const errText = await response.text();
-      throw new Error(`Cohere API қатесі: ${response.status} - ${errText}`);
-    }
+    const MIN_RELEVANCE_SCORE = 0.40;
 
-    const data: any = await response.json();
+    const data: any = response.data;
     
-    const rerankedDocs: SearchResult[] = [];
-    for (const res of data.results) {
-       const originalDoc = documents[res.index];
-       // update score explicitly with reranker's confidence
-       originalDoc.score = res.relevance_score;
-       rerankedDocs.push(originalDoc);
+    let rerankedDocs: SearchResult[] = [];
+    if (data && data.records && Array.isArray(data.records)) {
+      for (const res of data.records) {
+         const originalIndex = parseInt(res.id, 10);
+         const originalDoc = documents[originalIndex];
+         const rScore = res.score !== undefined ? res.score : originalDoc.score;
+         if (originalDoc) {
+           originalDoc.score = rScore;
+           rerankedDocs.push(originalDoc);
+         }
+      }
     }
 
-    console.log(`[✅] Rerank аяқталды. Үздік ${rerankedDocs.length} документ іріктелді.`);
+    // Сотау (ең жоғарғы балл бірінші)
+    rerankedDocs.sort((a, b) => (b.score || 0) - (a.score || 0));
+
+    // Егер ешқандай құжат 0.40-тан аспаса, бірақ бәрібір ең жақсы байланысты құжаттар болса, 
+    // кем дегенде 0.05-тен асатын алғашқы 3 құжатты аламыз.
+    const strictDocs = rerankedDocs.filter(d => (d.score || 0) >= 0.40);
+    
+    if (strictDocs.length > 0) {
+       rerankedDocs = strictDocs;
+       console.log(`[✅] Rerank аяқталды. Үздік ${rerankedDocs.length} документ іріктелді (Score >= 0.40).`);
+    } else {
+       console.warn("[⚠️] Reranker-ден кейін бірде-бір məтін шектен (0.40) өте алмады. Жұмсақ шек қолданылуда (Score >= 0.05).");
+       rerankedDocs = rerankedDocs.filter(d => (d.score || 0) >= 0.05).slice(0, 3);
+       if (rerankedDocs.length === 0) {
+           console.warn("[⚠️] Жұмсақ шектен де (0.05) өте алмады. Бос массив қайтарылады.");
+       } else {
+           console.log(`[✅] Жұмсақ шекпен үздік ${rerankedDocs.length} документ іріктелді.`);
+       }
+    }
+
     return rerankedDocs;
-  } catch (error) {
-    console.error("[❌] Reranker жүйесінде қате орын алды (Fallback іске қосылды):", error);
-    // Graceful fallback to Qdrant's best top-5
-    return documents.slice(0, 5);
+  } catch (error: any) {
+    console.error("[❌] Reranker жүйесінде қате орын алды (Fallback іске қосылды):", error.message, error.response?.data);
+    // Graceful fallback to Qdrant's best top-5 with a mini threshold
+    const FALLBACK_MIN_QDRANT_SCORE = 0.005; // Qdrant RRF values are usually small (e.g. 0.01 - 0.03)
+    const validFallbackDocs = documents.filter(doc => doc.score >= FALLBACK_MIN_QDRANT_SCORE);
+    
+    if (validFallbackDocs.length === 0) {
+      console.warn("[⚠️] Fallback кезінде Qdrant нәтижелері де шектен (0.005) төмен болды. Бос массив қайтарылады.");
+      return [];
+    }
+    
+    return validFallbackDocs.slice(0, 5);
   }
 }
+
 
 /**
  * Пайдаланушының сұрағы бойынша Hybrid Search (BM25 + Dense) жүргізеді, содан соң RRF & Reranker.
@@ -115,7 +151,12 @@ export async function searchAnswers(query: string, preComputedDenseVector?: numb
     }
 
     // 2. Сұрақты Sparse векторға (BM25) айналдыру (Қатар орындау)
-    const sparseVector = tokenizeAndHash(query);
+    let sparseVector: { indices: number[], values: number[] } | null = null;
+    try {
+      sparseVector = tokenizeAndHash(query);
+    } catch (e) {
+      console.warn(`[⚠️] Sparse вектор жасауда қате кетті, тек Dense іздеу қолданылады:`, e);
+    }
 
     // Qdrant клиентін тексеру
     if (!qdrant) {
@@ -125,18 +166,24 @@ export async function searchAnswers(query: string, preComputedDenseVector?: numb
 
     // 3. Qdrant-тан Hybrid Search арқылы Top-30 chunk іздеу (RRF Fusion)
     console.log(`[⏳] Qdrant дерекқорынан Hybrid Search (RRF) арқылы ең ұқсас 30 үзіндіні іздеу...`);
+    
+    const prefetchRequests: any[] = [
+      {
+        query: denseVector,
+        limit: 30
+      }
+    ];
+
+    if (sparseVector && sparseVector.values.length > 0) {
+      prefetchRequests.push({
+        query: sparseVector,
+        using: 'text_sparse',
+        limit: 30
+      });
+    }
+
     const searchResponse = await qdrant.query(QDRANT_COLLECTION, {
-      prefetch: [
-        {
-          query: denseVector,
-          limit: 30
-        },
-        {
-          query: sparseVector,
-          using: 'text_sparse',
-          limit: 30
-        }
-      ],
+      prefetch: prefetchRequests,
       query: { fusion: "rrf" },
       limit: 30,
       with_payload: true
@@ -155,6 +202,7 @@ export async function searchAnswers(query: string, preComputedDenseVector?: numb
       
       return {
         text: String(payload.text || ''),
+        parentText: payload.parentText ? String(payload.parentText) : undefined,
         book: String(payload.book || 'Белгісіз кітап'),
         page: pageNum,
         pages: pagesArray,
@@ -165,8 +213,24 @@ export async function searchAnswers(query: string, preComputedDenseVector?: numb
 
     // 5. Reranker арқылы үздік 5-ті іріктеу
     if (formattedResults.length > 0) {
-      console.log(`[✅] Qdrant нәтижелерін тікелей қайтару (Top-5)...`);
-      return formattedResults.slice(0, 5);
+      const reranked = await rerankResults(query, formattedResults);
+      
+      const finalResults: SearchResult[] = [];
+      const seenParents = new Set<string>();
+
+      for (const doc of reranked) {
+         // LLM контекстіне ең үлкен, толық Parent абзацты жібереміз. Егер ол жоқ болса, өзінің Child мәтінін жібереміз.
+         const contentToUse = doc.parentText || doc.text;
+         if (!seenParents.has(contentToUse)) {
+            seenParents.add(contentToUse);
+            finalResults.push({
+               ...doc,
+               text: contentToUse, // Агентке мәтінді беру үшін
+               parentText: undefined // қажеті жоқ бұдан былай
+            });
+         }
+      }
+      return finalResults;
     }
     
     return [];

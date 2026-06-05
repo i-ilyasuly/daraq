@@ -18,8 +18,8 @@ async function run() {
     for (const step of ttsInteraction.steps) {
       if (step.type === 'model_output') {
         const audioContent = step.content?.find((c: any) => c.type === 'audio');
-        if (audioContent && audioContent.data) {
-            audioBuffer = Buffer.from(audioContent.data, 'base64');
+        if (audioContent && (audioContent as any).data) {
+            audioBuffer = Buffer.from((audioContent as any).data, 'base64');
         }
       }
     }

@@ -25,6 +25,8 @@ import {
   getCustomEmojiMap, EMOJI_FALLBACKS, extractEmojiAndText
 } from './emojiService';
 
+export { getSourceInfo, setSourceInfo, getGroupInfo, setGroupInfo, renamedTopicsCache } from './botCache';
+
 export function processAndDeduplicateSources(rawSources: any[], answerText?: string): { quranSources: any[]; bookSources: any[] } {
   if (!rawSources || rawSources.length === 0) {
     return { quranSources: [], bookSources: [] };
@@ -184,8 +186,8 @@ export function buildKeyboard(quranSources: any[], bookSources: any[], quranPage
     }
   }
 
-  // Дауыстық жауап батырмасын қосу
-  buttons.push([Markup.button.callback('🎤 Дыбыстық жауап', 'voice_resp')]);
+  // Дауыстық жауап батырмасын қосу (Voice generation feature temporarily disabled per user instruction)
+  // buttons.push([Markup.button.callback('🎤 Дыбыстық жауап', 'voice_resp')]);
 
   if (buttons.length === 0) return null;
   return Markup.inlineKeyboard(buttons);
@@ -1059,13 +1061,13 @@ export function setupBot() {
         return ctx.reply("❌ Кешіріңіз, дыбыстауға арналған мәтін табылмады.");
       }
 
-      await ctx.telegram.sendChatAction(ctx.chat!.id, 'record_voice', { message_thread_id: ctx.callbackQuery.message.message_thread_id });
+      await ctx.telegram.sendChatAction(ctx.chat!.id, 'record_voice', { message_thread_id: (ctx.callbackQuery.message as any).message_thread_id });
 
       const { audioBuffer } = await getVoiceResponse(messageId, originalText);
 
       await ctx.telegram.sendVoice(ctx.chat!.id, { source: audioBuffer, filename: 'voice.ogg' }, { 
         reply_parameters: { message_id: messageId },
-        message_thread_id: ctx.callbackQuery.message.message_thread_id
+        message_thread_id: (ctx.callbackQuery.message as any).message_thread_id
       });
 
     } catch (error: any) {

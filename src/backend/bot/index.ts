@@ -186,9 +186,6 @@ export function buildKeyboard(quranSources: any[], bookSources: any[], quranPage
     }
   }
 
-  // Дауыстық жауап батырмасын қосу (Voice generation feature temporarily disabled per user instruction)
-  // buttons.push([Markup.button.callback('🎤 Дыбыстық жауап', 'voice_resp')]);
-
   if (buttons.length === 0) return null;
   return Markup.inlineKeyboard(buttons);
 }
@@ -1043,45 +1040,9 @@ export function setupBot() {
 
   bot.action('voice_resp', async (ctx) => {
     try {
-      try {
-        await ctx.answerCbQuery("⏳ Дыбыс жасалуда...", { show_alert: false });
-      } catch (e) {
-        console.warn("[VoiceAgent] Ignore answerCbQuery error:", e);
-      }
-
-      if (!ctx.callbackQuery.message) {
-        throw new Error("No message attached to callback query.");
-      }
-
-      const msg = ctx.callbackQuery.message as any;
-      const messageId = msg.message_id;
-      const originalText = msg.text || msg.caption || "";
-
-      if (!originalText) {
-        return ctx.reply("❌ Кешіріңіз, дыбыстауға арналған мәтін табылмады.");
-      }
-
-      await ctx.telegram.sendChatAction(ctx.chat!.id, 'record_voice', { message_thread_id: (ctx.callbackQuery.message as any).message_thread_id });
-
-      const { audioBuffer } = await getVoiceResponse(messageId, originalText);
-
-      await ctx.telegram.sendVoice(ctx.chat!.id, { source: audioBuffer, filename: 'voice.ogg' }, { 
-        reply_parameters: { message_id: messageId },
-        message_thread_id: (ctx.callbackQuery.message as any).message_thread_id
-      });
-
-    } catch (error: any) {
-      console.error("[VoiceAgent] Error generating voice response:", error, error.response?.data || "");
-      let errorMessage = "❌ Дыбыс қызметі уақытша қолжетімді емес.";
-      if (error?.status === 429 || error?.message?.includes("429") || error?.message?.includes("quota")) {
-        errorMessage = "❌ Дыбыстау қызметінің лимиті таусылды. Біраз уақыттан соң қайталап көріңіз.";
-      } else {
-        errorMessage += ` (Қате: ${error.message})`;
-      }
-      
-      await ctx.reply(errorMessage, { 
-        reply_parameters: { message_id: ctx.callbackQuery?.message?.message_id } 
-      }).catch(e => console.error("Error sending failure reply:", e));
+      await ctx.answerCbQuery("❌ Кешіріңіз, дыбыстау қызметі уақытша өшірілген.", { show_alert: true });
+    } catch (e) {
+      console.warn("[VoiceAgent] Ignore answerCbQuery error:", e);
     }
   });
 

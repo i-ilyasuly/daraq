@@ -138,7 +138,7 @@ function mapModelForVertex(modelName: string): string {
     return 'gemini-1.5-pro';
   }
   // All other flash/lite or unknown models:
-  return 'gemini-2.5-flash';
+  return 'gemini-flash-lite-latest';
 }
 
 aiStudio.models.generateContent = async function(args: any) {
@@ -216,7 +216,7 @@ aiStudio.models.generateContent = async function(args: any) {
     }
 
     // Stage 3: Cascade fallbacks through both AI Studio and Vertex AI
-    const fallbackModels = ['gemini-2.5-flash', 'gemini-1.5-flash'];
+    const fallbackModels = ['gemini-flash-lite-latest', 'gemini-1.5-flash'];
     for (const fallbackModel of fallbackModels) {
       console.log(`[🔄] Cascading content generation fallback to: '${fallbackModel}'...`);
       const fallbackArgs = { ...args, model: fallbackModel };
@@ -323,7 +323,7 @@ aiStudio.models.generateContentStream = async function(args: any) {
     }
 
     // Stage 3: Cascade fallbacks for Stream
-    const fallbackModels = ['gemini-2.5-flash', 'gemini-1.5-flash'];
+    const fallbackModels = ['gemini-flash-lite-latest', 'gemini-1.5-flash'];
     for (const fallbackModel of fallbackModels) {
       console.log(`[🔄] Cascading stream generation fallback to: '${fallbackModel}'...`);
       const fallbackArgs = { ...args, model: fallbackModel };

@@ -5,10 +5,11 @@ import sharp from 'sharp';
 import { Storage } from '@google-cloud/storage';
 import { storage as customStorage } from '../storage';
 import { searchAnswers } from '../rag/searchService';
-import { generateAgentAnswerStream, saveToChatHistory, rewindHistory } from '../rag/aiService';
+import { generateAgentAnswerStream, saveToChatHistory, rewindHistory, correctTranscribedText } from '../rag/aiService';
 import { ai } from '../rag/aiClient';
 import { db } from '../db/firestore';
 import { getVoiceResponse } from '../rag/voiceAgent';
+import { transcribeKazakhVoice } from '../rag/scribeService';
 
 const storage = customStorage || new Storage();
 // Fallback for dev: if you don't set it, it'll try this name
@@ -461,12 +462,14 @@ export function setupBot() {
     }
   });
 
-  const handleIncomingMessage = async (ctx: any, customQuery?: string) => {
+  const handleIncomingMessage = async (ctx: any, customQuery?: string, isVoice: boolean = false) => {
     const chatId = String(ctx.chat.id);
     const targetThreadId = ctx.message?.message_thread_id;
     const query = customQuery || (ctx.message && ('text' in ctx.message) ? ctx.message.text : '');
 
     if (!query) return;
+
+    const quotePrefix = (isVoice && customQuery) ? `<blockquote><i>"${customQuery}"</i></blockquote>\n\n` : '';
 
     const topicCacheKey = `${chatId}_${targetThreadId || 'general'}`;
     const draftId = ctx.message ? ctx.message.message_id : Math.floor(Math.random() * 100000); // Using user message_id or custom fake ID
@@ -520,7 +523,7 @@ export function setupBot() {
         query,
         async (currentFullText) => {
           if (abortController.signal.aborted) return;
-          const formatted = formatTelegramMessage(currentFullText);
+          const formatted = quotePrefix + formatTelegramMessage(currentFullText);
           try {
             await ctx.telegram.callApi('sendMessageDraft', {
               chat_id: chatId,
@@ -611,7 +614,7 @@ export function setupBot() {
         }
       }
 
-      let finalMessage = formatTelegramMessage(answerData.answer, quranSources);
+      let finalMessage = quotePrefix + formatTelegramMessage(answerData.answer, quranSources);
 
       const extraOptions: any = { 
         parse_mode: 'HTML',
@@ -821,6 +824,77 @@ export function setupBot() {
       }
     }
   };
+
+  bot.on('voice', async (ctx: any) => {
+    const chatId = String(ctx.chat.id);
+    const targetThreadId = ctx.message?.message_thread_id;
+    const draftId = ctx.message ? ctx.message.message_id : Math.floor(Math.random() * 100000);
+
+    try {
+      // 1. Пайдаланушыға жазу/жүктеу статус жібереміз
+      await ctx.telegram.sendChatAction(chatId, 'upload_voice', targetThreadId ? { message_thread_id: targetThreadId } : undefined);
+      
+      // Бот әрекеті: жағдай статустарының тізіміне дауысты өңдеуді қосу (осылайша жеке жаңа хабарлама ретінде шықпайды)
+      await ctx.telegram.callApi('sendMessageDraft', {
+        chat_id: chatId,
+        draft_id: draftId,
+        message_thread_id: targetThreadId,
+        text: '⏳ <i>Дауыстық хабарлама өңделуде...</i>',
+        parse_mode: 'HTML'
+      });
+
+      // 2. Файл сілтемесін алу
+      const fileId = ctx.message.voice.file_id;
+      const fileLink = await ctx.telegram.getFileLink(fileId);
+
+      // 3. Файлды жүктеп алу (Buffer ретінде)
+      const downloadResponse = await fetch(fileLink.href);
+      if (!downloadResponse.ok) {
+        throw new Error(`Failed to download audio file from Telegram: ${downloadResponse.statusText}`);
+      }
+      const arrayBuffer = await downloadResponse.arrayBuffer();
+      const audioBuffer = Buffer.from(arrayBuffer);
+
+      // 4. ElevenLabs Scribe v2 арқылы транскрипция жасау
+      const transcribedText = await transcribeKazakhVoice(audioBuffer);
+
+      if (!transcribedText || transcribedText.trim().length === 0) {
+        await ctx.telegram.callApi('sendMessageDraft', {
+          chat_id: chatId,
+          draft_id: draftId,
+          message_thread_id: targetThreadId,
+          text: '❌ Дауыстан ештеңе түсіне алмадым. Баяу әрі нақтырақ сөйлеп көріңізші.',
+          parse_mode: 'HTML'
+        });
+        return;
+      }
+
+      // Түзету статусын көрсету
+      await ctx.telegram.callApi('sendMessageDraft', {
+        chat_id: chatId,
+        draft_id: draftId,
+        message_thread_id: targetThreadId,
+        text: '⏳ <i>Дыбыс мәтінге айналды. Мәтіндегі қателіктер түзетілуде...</i>',
+        parse_mode: 'HTML'
+      });
+
+      // 4.5. Gemini арқылы мәтінді түзетіп алу
+      const correctedText = await correctTranscribedText(transcribedText);
+
+      // 5. RAG ядромызға танылған әрі түзетілген мәтінді бағыттау
+      await handleIncomingMessage(ctx, correctedText, true);
+
+    } catch (error: any) {
+      console.error('[❌ VOICE TRANSCRIPTION ERROR]:', error);
+      await ctx.telegram.callApi('sendMessageDraft', {
+        chat_id: chatId,
+        draft_id: draftId,
+        message_thread_id: targetThreadId,
+        text: `❌ Дауыстық хабарламаны өңдеу барысында қателік орын алды: ${error.message || error}`,
+        parse_mode: 'HTML'
+      });
+    }
+  });
 
   bot.on('message', async (ctx: any) => {
     await handleIncomingMessage(ctx);

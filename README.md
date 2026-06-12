@@ -71,7 +71,7 @@ npm run start
 
 ## 🛠️ Құралдар мен технологиялар
 - **Backend:** Node.js, Express, TypeScript
-- **AI/LLM:** Google Gemini (`gemini-3.1-pro-preview`, `gemini-embedding-2-preview`)
+- **AI/LLM:** Google Gemini (`gemini-flash-lite-latest`, `gemini-embedding-2`)
 - **Векторлық база:** Qdrant Cloud
 - **Дерекқор & Файлдар:** Firebase Firestore, Google Cloud Storage
 - **Бот фреймворкі:** Telegraf (Telegram)

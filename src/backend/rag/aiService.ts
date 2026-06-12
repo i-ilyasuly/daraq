@@ -3,10 +3,22 @@ import { SearchResult, searchAnswers } from './searchService';
 import { ai, generateContentFixed, generateContentStreamFixed, GEMINI_GENERATION_MODEL, GEMINI_INTENT_MODEL } from './aiClient';
 import { fetchSingleVerse, searchQuran } from './quranService';
 import { checkCache, writeCache } from './cacheService';
+import { getVerifiedFatwasContext } from './webSearchService';
 import { Type, ThinkingLevel } from '@google/genai';
 import 'dotenv/config';
 
-import { SYSTEM_PROMPT } from './prompts';
+import { SYSTEM_PROMPT, TRANSCRIPTION_CORRECTION_PROMPT } from './prompts';
+
+function tryGetDomain(urlStr: string): string {
+  try {
+    const url = new URL(urlStr);
+    return url.hostname.replace('www.', '');
+  } catch (e) {
+    if (urlStr.includes('fatua.kz')) return 'fatua.kz';
+    if (urlStr.includes('muftyat.kz')) return 'muftyat.kz';
+    return 'Дереккөз сілтемесі';
+  }
+}
 
 
 async function classifyIntent(query: string, history: {role: string, parts: any[]}[]): Promise<'CHITCHAT' | 'KNOWLEDGE_SEARCH'> {
@@ -114,15 +126,8 @@ export async function rewindHistory(chatId: string, threadId: string | number | 
     // First, try to find the message by msgId
     let snapshot = await msgRef.where('msgId', '==', targetMsgId).get();
     
-    // Fallback: If not found, it might be an older message without msgId. 
-    // We can try to clean up by just deleting the last bot message and keeping the history loose,
-    // but the safest approach for guaranteed overwrite is to find the user message just before the bot message
-    // Since we don't know the bot message either, we rely on the msgId for new messages.
-    // If it's empty and we can't find it, we will just return.
-    
     if (snapshot.empty) {
       console.log(`[⚠️] Cannot rewind history, message ID ${targetMsgId} not found in Firestore. Older message format?`);
-      // Since we can't find the exact target, we can't overwrite it. We'll return empty.
       return result;
     }
     
@@ -198,7 +203,7 @@ function parseQuranReferences(query: string): string[] {
     'рум': 30, 'лұқман': 31, 'сәжде': 32, 'ахзаб': 33, 'сәбә': 34, 'фатыр': 35, 'ясин': 36, 'саффат': 37, 'саад': 38, 'зумар': 39,
     'ғафир': 40, 'фуссилат': 41, 'шура': 42, 'зухруф': 43, 'духан': 44, 'жәсия': 45, 'ахқаф': 46, 'мұхаммед': 47, 'фатх': 48,
     'хужурат': 49, 'қаф': 50, 'зәрият': 51, 'тур': 52, 'нәжм': 53, 'қамар': 54, 'рахман': 55, 'уақиға': 56, 'хадид': 57, 'мужәдәлә': 58,
-    'хашр': 59, 'мумтахина': 60, 'саф': 61, 'жұма': 62, 'мунафиқун': 63, 'тағабун': 64, 'талақ': 65, 'тахрим': 66, 'мүлік': 67, 'мулк': 67,
+    'хашр': 59, 'мумtaхина': 60, 'саф': 61, 'жұма': 62, 'мунафиқун': 63, 'тағабун': 64, 'талақ': 65, 'тахрим': 66, 'мүлік': 67, 'мулк': 67,
     'қалам': 68, 'хаққа': 69, 'мағариж': 70, 'нұх': 71, 'жын': 72, 'муззаммил': 73, 'муддәссир': 74, 'қиямет': 75, 'инсан': 76, 'мүрсәләт': 77, 'нәбә': 78,
     'назиғат': 79, 'ғабит': 80, 'тәкуир': 81, 'инфитар': 82, 'мутаффифин': 83, 'иншиқақ': 84, 'буруж': 85, 'тариқ': 86, 'ала': 87,
     'ғашия': 88, 'фәжр': 89, 'бәләд': 90, 'шәмс': 91, 'ләйл': 92, 'духа': 93, 'инширах': 94, 'шарх': 94, 'тин': 95,
@@ -300,8 +305,8 @@ export async function generateAgentAnswerStream(
 1. HTML ТЕГТЕРІН ҚОЛДАН: <b> (жуан мәтін), <i> (көлбеу мәтін), <blockquote> (дәйексөздер). Ескі жауаптағы Құран аяттарының аудармаларын, Хадистерді немесе ғалымдардың/кітаптардың тікелей үзінділерін («кітапта жазылған үзінділер») тауып, оларды міндетті түрде <blockquote>...</blockquote> тегтерінің ішіне ал! Ескі жауапта бұрыннан бар <blockquote>...</blockquote> дәйексөз форматтауларын мүлтіксіз сақтап, қайта құрастырғанда да дәйексөз ретінде қалдыр.
 2. Маркдаун белгілерін (мысалы, *, **) МҮЛДЕМ ҚОЛДАНБА. Тізімдер үшін қарапайым минус (-) сызықшасын немесе • (нүкте) таңбасын қолдан.
 3. Мәтін тым тығыз болмауы үшін абзацтар арасына кішігірім бос орын (жаңа жол) қалдыр.
-4. "Бұл туралы толық мәліметті... төмендегі батырманы басып..." деген сияқты БАТЫРМАҒА сілтейтін сөздерді АЛЫП ТАСТА, өйткені батырманы жүйе өзі қосады. Жай ғана жауаптың өзін әдемілеп бер.
-5. КӨПТІЛДІ ДІНИ ӘДЕП (Multilingual Islamic Adab): ЕШҚАШАН (с.а.с), (р.а), (а.с), pbuh, ﷺ сияқты қысқартуларды/символдарды қолданбау. Толыққанды мадақ-дұғаларды ЖАҚШАҒА АЛЫП (мысалы: "<i>(Алланың оған игілігі мен сәлемі болсын)</i>" немесе "<i>(мир ему и благословение Аллаха)</i>") тілге бейімдеп, міндетті түрде <i>(...)</i> (көлбеу және жақша ішінде) тегінің ішіне толық жаз.
+4. "Бұл туралы толық мәліметті... төмендегі батырманы басып..." деген сияқты БАТЫРМАҒА сілтейтін сөздерді АЛЫП ТАСТА, өйткені батырманы жүйе өзі қосады. Жай ғана жауапвтың өзін әдемілеп бер.
+5. КӨПТІЛДІ ДІНИ ӘДЕП (Multilingual Islamic Adab): ЕШҚАШАН (с.а.с), (r.а), (а.с), pbuh, ﷺ сияқты қысқартуларды/символдарды қолданбау. Толыққанды мадақ-дұғаларды ЖАҚШАҒА АЛЫП (мысалы: "<i>(Алланың оған игілігі мен сәлемі болсын)</i>" немесе "<i>(мир ему и благословение Аллаха)</i>") тілге бейімдеп, міндетті түрде <i>(...)</i> (көлбеу және жақша ішінде) тегінің ішіне толық жаз.
 ${userLanguage?.startsWith('ru') ? '6. ⚠️ ПЕРЕВОД: Обязательно переведи и дай ответ на РУССКОМ языке.' : ''}
 ${userLanguage?.startsWith('en') ? '6. ⚠️ TRANSLATION: Must translate and reply in ENGLISH.' : ''}
 ${dayOfWeekC === 5 ? '7. ⚠️ БҮГІН ЖҰМА: Бұл қасиетті Жұма күні. Жауабыңа «Жұма мүбәрак болсын! 🎊» мағынасындағы құттықтауды қос.' : ''}
@@ -364,110 +369,112 @@ ${hit.answer}
         currentPrompt = `[⚠️ БҮГІН ЖҰМА: Бұл қасиетті Жұма күні. Жауабыңа «Жұма мүбәрак болсын! 🎊» мағынасындағы құттықтауды қос]\n` + currentPrompt;
     }
 
+    const usedSources: SearchResult[] = [];
+    let webSourcesJoined = "";
+    let webSourcesList: { title: string; url: string; snippet: string }[] = [];
+
+    // Chitchat flows: skip DB search completely
     if (intent === 'CHITCHAT') {
-        console.log(`[⚡] Fast Track (CHITCHAT) іске қосылды...`);
-        const responseStream = await generateContentStreamFixed({
-            model: GEMINI_GENERATION_MODEL,
-            contents: [
-                ...history,
-                { role: 'user', parts: [{ text: currentPrompt }] }
-            ],
-            config: {
-                systemInstruction: SYSTEM_PROMPT,
-                temperature: 0.1,
-                thinkingConfig: {
-                    thinkingLevel: ThinkingLevel.MINIMAL
-                }
-            }
-        });
-
-        let answerText = "";
-        for await (const chunk of responseStream) {
-            if (chunk.text) {
-                answerText += chunk.text;
-                onChunk(answerText);
-            }
+      console.log(`[🤖] Chitchat flow triggered.`);
+      const responseStream = await generateContentStreamFixed({
+        model: GEMINI_GENERATION_MODEL,
+        contents: [
+          ...history,
+          { role: 'user', parts: [{ text: currentPrompt }] }
+        ],
+        config: {
+          systemInstruction: SYSTEM_PROMPT,
+          temperature: 0.5,
+          thinkingConfig: {
+            thinkingLevel: ThinkingLevel.MINIMAL
+          }
         }
-        
-        console.log(`[✅] CHITCHAT жауап толығымен аяқталды.`);
-        saveToChatHistory(chatId, 'user', query, threadId).catch(x => {});
-        saveToChatHistory(chatId, 'bot', answerText, threadId).catch(x => {});
+      });
 
-        return {
-           answer: answerText,
-           sources: [],
-           intent: 'CHITCHAT'
-        };
+      let answerText = "";
+      for await (const chunk of responseStream) {
+        if (abortSignal?.aborted) {
+           throw new Error("AbortError");
+        }
+        if (chunk.text) {
+          answerText += chunk.text;
+          onChunk(answerText);
+        }
+      }
+
+      if (!skipHistorySave) {
+        await saveToChatHistory(chatId, 'user', query, threadId);
+        await saveToChatHistory(chatId, 'bot', answerText, threadId);
+      }
+
+      return {
+        answer: answerText,
+        sources: [],
+        intent: 'CHITCHAT'
+      };
     }
 
-    // KNOWLEDGE_SEARCH іздеулерін өңдеу (Single-hop RAG!)
+    // Knowledge Search Flow
     onAction('🔍 Қажетті дереккөздерді қарастырудамын...');
-    
-    const usedSources: SearchResult[] = [];
 
-    // Қатар орындалатын іздеу уақыттары (Parallel Execution)
     const bookPromise = searchAnswers(query, vector);
-    
-    // Сұрақты талдап Құран аяттарының сілтемелерін алу
-    const quranReferences = parseQuranReferences(query);
-    const quranPromise = (async () => {
-         const results: SearchResult[] = [];
-         
-         // 1. Анықталған нақты аяттарды оқу
-         if (quranReferences.length > 0) {
-             for (const ref of quranReferences) {
-                 try {
-                     const r = await fetchSingleVerse(ref);
-                     if (r) {
-                         results.push({
-                             book: `${r.surahNameKk} сүресі`,
-                             page: parseInt(r.verseKey.split(':')[1], 10) || 1,
-                             text: `${r.arabicText}\n${r.translationText}`,
-                             imageUrl: "",
-                             score: 1.0,
-                             isQuran: true,
-                             url: r.quranComUrl
-                         });
-                     }
-                 } catch(e) {}
-             }
-         }
-         
-         // 2. Жалпы Құран тақырыбы бойынша іздеу
-         const lowercaseQuery = query.toLowerCase();
-         const needsQuranSearch = lowercaseQuery.includes('құран') || 
-                                  lowercaseQuery.includes('аят') || 
-                                  lowercaseQuery.includes('сүре') ||
-                                  lowercaseQuery.includes('бақара') ||
-                                  quranReferences.length === 0 && (lowercaseQuery.includes('намаз') || lowercaseQuery.includes('ораза'));
-                                  
-         if (needsQuranSearch) {
-             try {
-                 const quranSearchRes = await searchQuran(query);
-                 for (const r of quranSearchRes) {
-                     if (!results.some(existing => existing.book === `${r.surahNameKk} сүресі` && existing.page === (parseInt(r.verseKey.split(':')[1], 10) || 1))) {
-                         results.push({
-                             book: `${r.surahNameKk} сүресі`,
-                             page: parseInt(r.verseKey.split(':')[1], 10) || 1,
-                             text: `${r.arabicText}\n${r.translationText}`,
-                             imageUrl: "",
-                             score: 1.0,
-                             isQuran: true,
-                             url: r.quranComUrl
-                         });
-                     }
-                 }
-             } catch(e) {}
-         }
-         
-         return results;
-    })();
+    const quranRefs = parseQuranReferences(query);
+    const quranPromise = quranRefs.length > 0 ? (async () => {
+      const results: SearchResult[] = [];
+      for (const ref of quranRefs) {
+        try {
+          const verse = await fetchSingleVerse(ref);
+          if (verse) {
+            results.push({
+              book: `${verse.surahNameKk} сүресі`,
+              page: parseInt(ref.split(':')[1], 10) || 1,
+              text: `${verse.arabicText}\n${verse.translationText}`,
+              imageUrl: '',
+              score: 1.0,
+              isQuran: true,
+              url: verse.quranComUrl
+            });
+          }
+        } catch (e) {
+          console.error(`[⚠️ Quran fetch error]:`, e);
+        }
+      }
+      return results;
+    })() : Promise.resolve([] as SearchResult[]);
 
+    const MIN_RELEVANCE_SCORE = 0.50;
     const [bookResults, quranResults] = await Promise.all([bookPromise, quranPromise]);
     usedSources.push(...bookResults);
     usedSources.push(...quranResults);
 
-    // Дәлелдер тарихын қалпына келтіру (Егер сұрақ дәлел туралы болса, бұрын табылған соңғы деректерді де қоса тұрамыз)
+    // Evaluate relevance score from book search
+    const maxScore = bookResults.length > 0 ? Math.max(...bookResults.map(r => r.score || 0)) : 0;
+    const isModernIssue = /крипто|биткоин|vape|вейп|электронды темекі|электронные сигареты|интернет|онлайн|акция|маркетплейс|сетевой маркетинг|вакцина|пластикалық|пластическая/i.test(query);
+
+    if (maxScore < MIN_RELEVANCE_SCORE || isModernIssue) {
+      console.log(`[🔍 Orchestration] Triggering search_official_kazakh_fatwas. Low relevance (${maxScore.toFixed(4)} < ${MIN_RELEVANCE_SCORE}) or modern issue.`);
+      try {
+        const webResult = await getVerifiedFatwasContext(query, onAction);
+        webSourcesJoined = webResult.text;
+        webSourcesList = webResult.sources;
+        
+        // Append web sources to usedSources list so they are saved / cached
+        webSourcesList.forEach(src => {
+          usedSources.push({
+            text: src.snippet,
+            book: "ҚМДБ Пәтуасы",
+            page: 1,
+            imageUrl: "",
+            score: 1.0,
+            url: src.url
+          });
+        });
+      } catch (err: any) {
+        console.error(`[🚨 Orchestration] search_official_kazakh_fatwas failed or timed out:`, err.message || err);
+      }
+    }
+
+    // Дәлелдер тарихын қалпына келтіру (Егер сұрақ дәлел тураса, бұрын табылған соңғы деректерді де қоса тұрамыз)
     if (isProofQuery && cachedSources && cachedSources.length > 0) {
         for (const src of cachedSources) {
             if (!usedSources.some(existing => existing.book === src.book && existing.page === src.page)) {
@@ -479,7 +486,7 @@ ${hit.answer}
     // LLM-ге арналған контекстті құрастыру
     let contextText = "";
     
-    const booksFound = usedSources.filter(s => !s.isQuran);
+    const booksFound = usedSources.filter(s => !s.isQuran && s.book !== "ҚМДБ Пәтуасы");
     const quranFound = usedSources.filter(s => s.isQuran);
     
     if (booksFound.length > 0) {
@@ -494,6 +501,11 @@ ${hit.answer}
         contextText += quranFound.map((r, i) =>
             `[Құран аяты ${i + 1}] СҮРЕ: "${r.book}", АЯТ НӨМІРІ: ${r.page}\nАРАБША: ${r.text.split('\n')[0]}\nАУДАРМАСЫ: ${r.text.split('\n').slice(1).join('\n')}`
         ).join('\n\n') + "\n\n";
+    }
+
+    if (webSourcesJoined) {
+        contextText += "=== [ҚМДБ РЕСМИ САЙТЫНАН (MUFTYAT.KZ/FATUA.KZ) ТАБЫЛҒАН ҚАЗІРГІ ЗАМАНҒЫ ПӘТУАЛАР] ===\n";
+        contextText += webSourcesJoined + "\n\n";
     }
 
     if (!contextText) {
@@ -528,8 +540,9 @@ ${contextText}
 
 ⚠️ МАҢЫЗДЫ ЕРЕЖЕ СЕКЦИЯСЫ:
 Пайдаланушыға осы контекстте бар мәлімет аясында Ханафи мазһабының ұстазы ретінде (Persona-ға сәйкес) жауап бер.
+Егер табылған деректерде ҚМДБ ресми сайтынан алынған қазіргі заманғы пәтуалар болса, соларға сүйеніп толық ресми және заманауи пәтуа үкімін түсіндіріп бер. Егер классикалық кітаптар да, заманауи пәтуалар да қатар табылса, екеуін біріктіріп ең жақсы жауап нұсқасын жаса.
 Егер ешқандай ақпарат табылмаса немесе контексте нақты жауап болмаса, онда нақты "Бұл мәлімет кітаптардан табылмады, сондықтан нақты жауап бере алмаймын" деп ашық айт. Жалған кітап атын немесе жауап ойлап таппа!
-Парақ соңында "Бұл туралы толық мәліметті «[Кітап аты]» еңбегінің [Бет нөмірі]-бетінен тауып бердім." деп қана жаз. ЕШҚАНДАЙ батырма (кнопка) туралы сөз жазба!
+Парақ соңында ақпарат классикалық кітаптан болса "Бұл туралы толық мәліметті «[Кітап аты]» еңбегінің [Бет нөмірі]-бетінен тауып бердім." деп қана жаз. Егер тек қазіргі заман пәтуасынан табылған болса, ҚМДБ ресми пәтуаларын қолданғаныңды қысқаша атап өт. ЕШҚАНДАЙ батырма (кнопка) туралы сөз жазба!
 
 Жауапты таза HTML элементтерімен (<b>, <blockquote>) жасап, бірден ағынмен жазуды баста:`;
 
@@ -565,6 +578,17 @@ ${contextText}
     if (!answerText) {
       answerText = "Кешіріңіз, жауап құрастыру мүмкін болмады.";
     } else {
+      // Append web search source citations if any exist
+      if (webSourcesList.length > 0) {
+        const citationLinks = webSourcesList.map(src => {
+          const domain = tryGetDomain(src.url);
+          return `<a href="${src.url}">${domain}</a>`;
+        });
+        const citations = `\n\n<blockquote>Дереккөз: ${citationLinks.join(', ')}</blockquote>`;
+        answerText += citations;
+        // Trigger onChunk one last time to push the citations
+        onChunk(answerText);
+      }
       // Кэшке жазу (Fire and forget асинхронды)
       writeCache(query, answerText, usedSources).catch(e => console.error("Cache write error:", e));
     }
@@ -613,4 +637,90 @@ export async function generateAnswer(
     threadId,
     userLanguage
   );
+}
+
+/**
+ * Сөйлеу транскрипциясын түзетуден кейінгі сыни тексеріс пен тазалау
+ */
+export function validateAndCleanCorrection(rawText: string, correctedText: string): string {
+  let cleaned = correctedText.trim();
+  
+  // 1. "Шығыс:" немесе "Жауап:" сияқты префикстерді алып тастау
+  cleaned = cleaned.replace(/^(шығыс|жауап|түзетілген|corrected|output|кіріс|input)\s*:\s*/i, '');
+  cleaned = cleaned.trim();
+
+  // Егер тырнақшалардың ішіне алып берсе, оларды да тазалау
+  if (cleaned.startsWith('"') && cleaned.endsWith('"') && cleaned.length > 2) {
+    cleaned = cleaned.substring(1, cleaned.length - 1).trim();
+  }
+
+  const normalized = cleaned.toLowerCase();
+
+  // 2. Артық метамәлімет немесе модельдің өз диалогын анықтауға арналған қара тізім
+  const blacklistedTokens = [
+    'түсінікті',
+    'түзетуді қажет',
+    'мәтінді жіберсеңіз',
+    'нұсқауларға сай',
+    'сауатты түрде',
+    'қалпына келтіріп',
+    'сіздің сұрағыңыз',
+    'түзетілген нұсқа',
+    'сұраққа жауап',
+    'шығыс:',
+    'кіріс:',
+    'қатаң тыйымдар',
+    'нұсқаулық',
+    'нұсқауларға сәйкес',
+    'жасанды интеллект',
+    'моделісің'
+  ];
+
+  for (const token of blacklistedTokens) {
+    if (normalized.includes(token)) {
+      console.warn(`[⚠️ CORRECTOR GUARD] Blacklist token "${token}" triggered in corrected text! Falling back to raw.`);
+      return rawText;
+    }
+  }
+
+  // 3. Ұзындықты бақылау: Егер шикі мәтін қысқа болса, бірақ түзетілген мәтін одан бірнеше есе ұзын болып, нұсқаулықтарды шығарып жіберсе
+  if (rawText.length < 15 && cleaned.length > 80) {
+    console.warn(`[⚠️ CORRECTOR GUARD] Suspicious length expansion! Raw: ${rawText.length}, Corrected: ${cleaned.length}. Falling back to raw.`);
+    return rawText;
+  }
+
+  return cleaned;
+}
+
+/**
+ * Дауыстық хабарлама транскрипциясын қазақша грамматикаға немесе діни терминдерге сай түзету
+ */
+export async function correctTranscribedText(rawText: string): Promise<string> {
+  if (!rawText || rawText.trim().length === 0) return rawText;
+
+  try {
+    console.log(`[🎙 CORRECTOR] Correcting speech transcription with Gemini: "${rawText}"`);
+    const response = await generateContentFixed({
+      model: GEMINI_GENERATION_MODEL,
+      contents: [{ role: 'user', parts: [{ text: rawText }] }],
+      config: {
+        systemInstruction: TRANSCRIPTION_CORRECTION_PROMPT,
+        temperature: 0.1,
+        thinkingConfig: {
+          thinkingLevel: ThinkingLevel.MINIMAL
+        }
+      }
+    });
+
+    const result = (response.text || '').trim();
+    if (result && result.length > 0) {
+      const validated = validateAndCleanCorrection(rawText, result);
+      console.log(`[🎙 CORRECTOR] Successfully corrected transcription: "${validated}" (original: "${rawText}")`);
+      return validated;
+    }
+  } catch (error: any) {
+    console.error('[❌ CORRECTOR ERROR]: Failed to correct voice transcription, falling back to raw:', error.message || error);
+  }
+
+  return rawText;
 }

@@ -49,14 +49,17 @@ if (!fs.existsSync(serviceAccountPath) && process.env.FIREBASE_PRIVATE_KEY && pr
        pk = `-----BEGIN PRIVATE KEY-----\n${chunks.join('\n')}\n-----END PRIVATE KEY-----\n`;
     }
 
+    const clientEmail = process.env.FIREBASE_CLIENT_EMAIL;
+    const inferredProjectId = 'momyn-t1';
+    
     const content = JSON.stringify({
       type: "service_account",
-      project_id: 'momyn-t1',
+      project_id: inferredProjectId,
       private_key: pk,
-      client_email: process.env.FIREBASE_CLIENT_EMAIL,
+      client_email: clientEmail,
     });
     fs.writeFileSync(serviceAccountPath, content, 'utf8');
-    console.log('[✅] Runtime: gcp-service-account.json ("momyn-t1") қайта жасалды.');
+    console.log(`[✅] Runtime: gcp-service-account.json ("${inferredProjectId}") қайта жасалды.`);
   } catch (e) {
     console.error("Service-account файлын құру мүмкін болмады.", e);
   }
@@ -107,6 +110,33 @@ const originalGenerateContent = aiStudio.models.generateContent.bind(aiStudio.mo
 const originalGenerateContentStream = aiStudio.models.generateContentStream.bind(aiStudio.models);
 const originalEmbedContent = aiStudio.models.embedContent.bind(aiStudio.models);
 
+async function retryOnUnavailable<T>(fn: () => Promise<T>, maxRetries = 3, delayMs = 1000): Promise<T> {
+  let attempt = 0;
+  while (true) {
+    try {
+      return await fn();
+    } catch (err: any) {
+      const errorStr = String(err?.message || err).toLowerCase();
+      // Detect transient errors like UNAVAILABLE, 503, bad gateways, or rate limits
+      const isTransient = 
+        errorStr.includes("unavailable") || 
+        errorStr.includes("503") || 
+        errorStr.includes("502") || 
+        errorStr.includes("resource_exhausted") || 
+        errorStr.includes("rate limit") || 
+        errorStr.includes("429");
+      
+      if (isTransient && attempt < maxRetries) {
+        attempt++;
+        console.warn(`[⏳] Transient Google API error (503/UNAVAILABLE/RateLimit/429) detected. Retrying in ${delayMs * attempt}ms... (Attempt ${attempt}/${maxRetries})`);
+        await new Promise(resolve => setTimeout(resolve, delayMs * attempt));
+        continue;
+      }
+      throw err;
+    }
+  }
+}
+
 let isAiStudioDepleted = false;
 
 function checkDepleted(err: any): boolean {
@@ -135,10 +165,9 @@ function mapModelForVertex(modelName: string): string {
     return 'text-multilingual-embedding-002';
   }
   if (clean.includes('pro')) {
-    return 'gemini-1.5-pro';
+    return 'gemini-2.5-pro'; 
   }
-  // All other flash/lite or unknown models:
-  return 'gemini-flash-lite-latest';
+  return 'gemini-2.5-flash';
 }
 
 aiStudio.models.generateContent = async function(args: any) {
@@ -155,7 +184,7 @@ aiStudio.models.generateContent = async function(args: any) {
       const mappedModel = mapModelForVertex(params.model);
       console.log(`[🔄] Redirecting generation to Vertex AI client with model '${mappedModel}' (original: '${params.model}')...`);
       const vertexParams = { ...params, model: mappedModel };
-      return await vertexAi.models.generateContent(vertexParams);
+      return await retryOnUnavailable(() => vertexAi!.models.generateContent(vertexParams));
     }
     throw new Error("Vertex AI client is not available.");
   };
@@ -171,7 +200,7 @@ aiStudio.models.generateContent = async function(args: any) {
 
   try {
     // Stage 1: Try Primary AI Studio Client
-    return await originalGenerateContent(cleanedArgs);
+    return await retryOnUnavailable(() => originalGenerateContent(cleanedArgs));
   } catch (err: any) {
     if (checkDepleted(err)) {
       isAiStudioDepleted = true;
@@ -191,7 +220,7 @@ aiStudio.models.generateContent = async function(args: any) {
         strippedArgs.config = { ...strippedArgs.config };
         delete strippedArgs.config.thinkingConfig;
         try {
-          return await originalGenerateContent(strippedArgs);
+          return await retryOnUnavailable(() => originalGenerateContent(strippedArgs));
         } catch (retryErr: any) {
           err = retryErr;
           if (checkDepleted(retryErr)) {
@@ -228,7 +257,7 @@ aiStudio.models.generateContent = async function(args: any) {
       // Try AI Studio fallback
       if (!isAiStudioDepleted) {
         try {
-          return await originalGenerateContent(fallbackArgs);
+          return await retryOnUnavailable(() => originalGenerateContent(fallbackArgs));
         } catch (studioErr: any) {
           if (checkDepleted(studioErr)) {
             isAiStudioDepleted = true;
@@ -264,7 +293,7 @@ aiStudio.models.generateContentStream = async function(args: any) {
       const mappedModel = mapModelForVertex(params.model);
       console.log(`[🔄] Redirecting stream to Vertex AI client with model '${mappedModel}' (original: '${params.model}')...`);
       const vertexParams = { ...params, model: mappedModel };
-      return await vertexAi.models.generateContentStream(vertexParams);
+      return await retryOnUnavailable(() => vertexAi!.models.generateContentStream(vertexParams));
     }
     throw new Error("Vertex AI client is not available.");
   };
@@ -280,7 +309,7 @@ aiStudio.models.generateContentStream = async function(args: any) {
 
   try {
     // Stage 1: Try Primary AI Studio Client
-    return await originalGenerateContentStream(cleanedArgs);
+    return await retryOnUnavailable(() => originalGenerateContentStream(cleanedArgs));
   } catch (err: any) {
     if (checkDepleted(err)) {
       isAiStudioDepleted = true;
@@ -298,7 +327,7 @@ aiStudio.models.generateContentStream = async function(args: any) {
         strippedArgs.config = { ...strippedArgs.config };
         delete strippedArgs.config.thinkingConfig;
         try {
-          return await originalGenerateContentStream(strippedArgs);
+          return await retryOnUnavailable(() => originalGenerateContentStream(strippedArgs));
         } catch (retryErr: any) {
           err = retryErr;
           if (checkDepleted(retryErr)) {
@@ -335,7 +364,7 @@ aiStudio.models.generateContentStream = async function(args: any) {
       // Try AI Studio fallback
       if (!isAiStudioDepleted) {
         try {
-          return await originalGenerateContentStream(fallbackArgs);
+          return await retryOnUnavailable(() => originalGenerateContentStream(fallbackArgs));
         } catch (studioErr: any) {
           if (checkDepleted(studioErr)) {
             isAiStudioDepleted = true;
@@ -371,7 +400,7 @@ aiStudio.models.embedContent = async function(args: any) {
       const mappedModel = mapModelForVertex(params.model);
       console.log(`[🔄] Redirecting embedding to Vertex AI client with model '${mappedModel}' (original: '${params.model}')...`);
       const vertexParams = { ...params, model: mappedModel };
-      return await vertexAi.models.embedContent(vertexParams);
+      return await retryOnUnavailable(() => vertexAi!.models.embedContent(vertexParams));
     }
     throw new Error("Vertex AI client is not available.");
   };
@@ -404,7 +433,7 @@ aiStudio.models.embedContent = async function(args: any) {
 
   try {
     // Stage 1: Try Primary AI Studio Client
-    const res = await originalEmbedContent(cleanedArgs);
+    const res = await retryOnUnavailable(() => originalEmbedContent(cleanedArgs));
     return normalizeResponse(res);
   } catch (err: any) {
     if (checkDepleted(err)) {
@@ -442,7 +471,7 @@ aiStudio.models.embedContent = async function(args: any) {
       // Try AI Studio
       if (!isAiStudioDepleted) {
         try {
-          const res = await originalEmbedContent(fallbackArgs);
+          const res = await retryOnUnavailable(() => originalEmbedContent(fallbackArgs));
           return normalizeResponse(res);
         } catch (studioErr: any) {
           if (checkDepleted(studioErr)) {

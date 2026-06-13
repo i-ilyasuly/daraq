@@ -21,6 +21,8 @@ export interface QuranVerseData {
   translationText: string;
   surahNameKk: string;
   quranComUrl: string;
+  audioUrl?: string;
+  audio_url?: string;
 }
 
 /**
@@ -53,16 +55,44 @@ export async function fetchSingleVerse(verseKey: string): Promise<QuranVerseData
 
     // Clean up HTML tags inside translation just in case
     translation = translation.replace(/<[^>]*>/g, '').trim();
+    // Replace slash annotations with parentheses e.g. " / text / " to " (text) "
+    translation = translation.replace(/\s*\/\s*([^/]+?)\s*\/\s*/g, ' ($1) ');
+    // Clean up spaces before punctuation that might result from slash replacements
+    translation = translation.replace(/\)\s+\./g, ').').replace(/\)\s+,/g, '),');
 
     const surahNameKk = SURAH_NAMES_KK[surahId] || `Сүре ${surahId}`;
     const quranComUrl = `https://quran.com/${surahId}/${v.verse_number}`;
+
+    let audioUrl = "";
+    try {
+      const audioRes = await fetch(`https://api.quran.com/api/v4/recitations/4/by_ayah/${verseKey}`);
+      if (audioRes.ok) {
+        const audioData = await audioRes.json();
+        const firstFile = audioData.audio_files?.[0];
+        if (firstFile && firstFile.url) {
+          audioUrl = firstFile.url.startsWith('http') 
+            ? firstFile.url 
+            : `https://audio.qurancdn.com/${firstFile.url}`;
+        }
+      }
+    } catch (e) {
+      console.error(`[⚠️] Error fetching audio recitation for ${verseKey}:`, e);
+    }
+
+    const pad3 = (num: number) => String(num).padStart(3, '0');
+    if (!audioUrl) {
+      const parsedVerseId = parseInt(verseStr, 10) || 1;
+      audioUrl = `https://audio.qurancdn.com/Shatri/mp3/${pad3(surahId)}${pad3(v.verse_number || parsedVerseId)}.mp3`;
+    }
 
     return {
       verseKey,
       arabicText: v.text_uthmani || "",
       translationText: translation,
       surahNameKk,
-      quranComUrl
+      quranComUrl,
+      audioUrl: audioUrl,
+      audio_url: audioUrl
     };
   } catch (error) {
     console.error(`[❌] Error fetching Quran.com verse ${verseKey}:`, error);
@@ -167,6 +197,6 @@ export async function getQuranVerseTool(verseKeyOrQuery: string): Promise<string
     return `[ҚҰРАН АЯТЫ] ${r.surahNameKk} сүресі, ${r.verseKey.split(':')[1]}-аят
 Сілтеме: ${r.quranComUrl}
 Арабша: ${r.arabicText}
-Қазақша аудармасы: ${r.translationText}`;
+Қазақша аудармасы: ${r.translationText}${r.audio_url ? `\nАудио сілтемесі: ${r.audio_url}` : ''}`;
   }).join('\n\n');
 }

@@ -2,7 +2,7 @@ import '../src/backend/crypto-patch';
 import { generateAgentAnswerStream } from '../src/backend/rag/aiService';
 
 const queries = [
-  "адамдар ауыз бекіткенде алдымен аштық пен әлсіздікті сезінеді ме? Неліктен"
+  "Үйлену жайлы аяттар айт"
 ];
 
 async function runTests() {

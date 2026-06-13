@@ -147,7 +147,7 @@ export async function getVerifiedFatwasContext(
 ): Promise<{ text: string; sources: { title: string; url: string; snippet: string }[] }> {
   try {
     if (onAction) {
-      onAction('🔍 ҚМДБ ресми сайтынан пәтуа іздеудемін...');
+      onAction('Сенімді сайттардан іздеу');
     }
 
     const webResults = await search_official_kazakh_fatwas(query);
@@ -160,7 +160,7 @@ export async function getVerifiedFatwasContext(
     const sourcesToLog = targets.map(t => ({ title: t.title, url: t.url, snippet: t.snippet }));
 
     if (onAction) {
-      onAction('📖 Мәліметтерді өңдеудемін...');
+      onAction('Ақпаратты өңдеу');
     }
 
     // Parallel fetch contents of selected articles

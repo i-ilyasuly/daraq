@@ -48,6 +48,24 @@ export function formatTelegramMessage(text: string, quranSources: any[] = []): s
   formatted = formatted.replace(/(?<!<)\*(?!>)(.*?)\*(?![^<]*>)/g, '<i>$1</i>'); // *italic*
   formatted = formatted.replace(/\|\|(.*?)\|\|/gs, '<tg-spoiler>$1</tg-spoiler>'); // ||spoiler|| -> <tg-spoiler>spoiler</tg-spoiler>
 
+  // Арабша мәтіннен кейін бірден қазақша басталса, олардың арасын ашу
+  formatted = formatted.replace(/([\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\u061F\u060C\u06D4\u06DD]{2,}[^А-ЯӨҮҰҚҒІҢәғқңөұүһіA-Za-z<]{0,20}?)([А-ЯӨҮҰҚҒІҢәғқңөұүһі«])/g, '$1\n\n$2');
+
+  // HTML тақырыптарының (h1-h6) айналасына бос абзацтар қосу
+  formatted = formatted.replace(/(<h[1-6]>)/gi, '\n\n$1');
+  formatted = formatted.replace(/(<\/h[1-6]>)/gi, '$1\n\n');
+
+  // Blockquote тегтерінің айналасына бос абзацтар қосу
+  formatted = formatted.replace(/(<blockquote(?:[^>]*)>)/gi, '\n\n$1\n');
+  formatted = formatted.replace(/(<\/blockquote>)/gi, '\n$1\n\n');
+
+  // Дәйексөздің сілтемесін (Құран, мысалы: "Бақара сүресі...") бөлектеу
+  // Қазақша жақшамен немесе жай басталған дереккөзді блоктың ішінде не сыртында болса да бос жолмен ашу
+  formatted = formatted.replace(/(\n[ \t]*)(?:\(|«|\[)?([А-ЯӨҮҰҚҒІҢәғқңөұүһі]+\s+сүресі)/g, '$1\n$2');
+
+  // Мағынасы мен Хикметі сөзінің жоғары жағына да бос абзац қосуды қамтамасыз ету
+  formatted = formatted.replace(/(Мағынасы мен [Хх]икметі)/g, '\n\n$1');
+
   // Үлкен бос орындарды болдырмау үшін 3 немесе одан көп қатар келген бос жолдарды бір бос жолға азайтамыз (ең көп дегенде 2 жаңа жол)
   formatted = formatted.replace(/(?:\r?\n\s*){3,}/g, '\n\n');
 
@@ -162,7 +180,17 @@ export function filterSourcesByResponse(sources: any[], answer: string): any[] {
   for (const src of quranSources) {
     const surahName = src.book.replace(" сүресі", "").trim().toLowerCase();
     const verseNum = src.page || 1;
-    if (lowercaseAnswer.includes(surahName) && answer.includes(String(verseNum))) {
+    const surahNameLatin = transliterateToLatin(surahName).toLowerCase();
+    
+    const matchesSurah = lowercaseAnswer.includes(surahName) || 
+                          lowercaseAnswer.includes(surahNameLatin) ||
+                          lowercaseAnswer.includes(surahNameLatin.replace('q', 'k')) ||
+                          lowercaseAnswer.includes(surahNameLatin.replace('q', 'g')) ||
+                          lowercaseAnswer.includes(surahNameLatin.replace('ae', 'a')) ||
+                          lowercaseAnswer.includes(surahNameLatin.replace('ae', 'e')) ||
+                          surahNameLatin.split(' ').some(part => part.length > 3 && lowercaseAnswer.includes(part));
+                          
+    if (matchesSurah || lowercaseAnswer.includes("quran.com") || lowercaseAnswer.includes("al-baqarah") || answer.includes(String(verseNum))) {
       filtered.push(src);
     }
   }

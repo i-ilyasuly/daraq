@@ -16,6 +16,7 @@ export interface SearchResult {
   score: number;
   isQuran?: boolean;
   url?: string;
+  audio_url?: string;
 }
 
 import { GoogleAuth } from 'google-auth-library';

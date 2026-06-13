@@ -28,6 +28,75 @@ import {
 
 export { getSourceInfo, setSourceInfo, getGroupInfo, setGroupInfo, renamedTopicsCache } from './botCache';
 
+export function formatStatusMessage(text: string): string {
+  // 1. Remove HTML tags if any (like <i>, </i>, <code>, </code>)
+  let clean = text.replace(/<[^>]*>?/gm, '');
+
+  // 2. Remove emojis and symbols: target common categories & specific emojis
+  clean = clean.replace(/[\u{1F300}-\u{1F9FF}]/gu, ''); // Miscellaneous Symbols and Pictographs, Supplemental Symbols and Pictographs
+  clean = clean.replace(/[\u{2700}-\u{27BF}]/gu, '');   // Dingbats
+  clean = clean.replace(/[\u{1F600}-\u{1F64F}]/gu, ''); // Emoticons
+  clean = clean.replace(/[\u{1F680}-\u{1F6FF}]/gu, ''); // Transport and Map Symbols
+  clean = clean.replace(/[\u{2600}-\u{26FF}]/gu, '');   // Miscellaneous Symbols
+  
+  // Specific emoji characters
+  clean = clean.replace(/[⏳⌛🔍👉✍️📖⚠️⚡️]/g, '');
+
+  // Strip variation selectors (\ufe0f)
+  clean = clean.replace(/\ufe0f/g, '');
+
+  // 3. Clean up leading/trailing whitespace
+  clean = clean.trim();
+
+  // Strip trailing ellipsis (...) if present
+  clean = clean.replace(/\.{3,}\s*$/, '');
+  clean = clean.trim();
+
+  // 4. Wrap with code tags for monospace style
+  return `<code>${clean}</code>`;
+}
+
+export function splitTextIntoSafeChunks(text: string, maxLength: number = 3800): string[] {
+    const chunks: string[] = [];
+    let current = '';
+    const paragraphs = text.split('\n\n');
+    for (const p of paragraphs) {
+        if (current.length + p.length + 2 > maxLength && current.length > 0) {
+            let chunkToPush = current;
+            const openB = (chunkToPush.match(/<b>/g) || []).length > (chunkToPush.match(/<\/b>/g) || []).length;
+            const openI = (chunkToPush.match(/<i>/g) || []).length > (chunkToPush.match(/<\/i>/g) || []).length;
+            const openQuote = (chunkToPush.match(/<blockquote(?: [^>]*)?>/g) || []).length > (chunkToPush.match(/<\/blockquote>/g) || []).length;
+            
+            if (openI) chunkToPush += '</i>';
+            if (openB) chunkToPush += '</b>';
+            if (openQuote) chunkToPush += '</blockquote>';
+            
+            chunks.push(chunkToPush);
+            
+            let prefix = '';
+            if (openQuote) prefix += '<blockquote>';
+            if (openB) prefix += '<b>';
+            if (openI) prefix += '<i>';
+            
+            let r = p;
+            while(r.length > maxLength) {
+                let slice = prefix + r.substring(0, maxLength - prefix.length);
+                // Also close tags for purely emergency hard slices
+                if (openI) slice += '</i>';
+                if (openB) slice += '</b>';
+                if (openQuote) slice += '</blockquote>';
+                chunks.push(slice);
+                r = r.substring(maxLength - prefix.length);
+            }
+            current = prefix + r;
+        } else {
+            current += (current ? '\n\n' : '') + p;
+        }
+    }
+    if (current) chunks.push(current);
+    return chunks;
+}
+
 export function processAndDeduplicateSources(rawSources: any[], answerText?: string): { quranSources: any[]; bookSources: any[] } {
   if (!rawSources || rawSources.length === 0) {
     return { quranSources: [], bookSources: [] };
@@ -50,12 +119,13 @@ export function processAndDeduplicateSources(rawSources: any[], answerText?: str
       const key = src.url || `${src.book}_${src.page}`;
       if (!seenQuran.has(key)) {
         seenQuran.add(key);
-        quranSources.push({
+         quranSources.push({
           book: src.book,
           page: src.page || 1,
           url: src.url || 'https://quran.com',
           isQuran: true,
-          text: src.text || ""
+          text: src.text || "",
+          audio_url: src.audio_url
         });
       }
     } else {
@@ -408,29 +478,29 @@ export function setupBot() {
     const chatId = ctx.chat.id;
 
     try {
-      await ctx.reply('⏳ "Ораза" және "Намаз" темаларын құру басталуда...');
+      await ctx.replyWithHTML(formatStatusMessage('"Ораза" және "Намаз" темаларын құру басталуда...'));
       
       const emojiMap = await getCustomEmojiMap(ctx.telegram);
       
       // Намаз (Mosque icon fallback to house if not exists)
       let namazEmojiId = emojiMap.get('🕌');
-      if (!namazEmojiId) namazEmojiId = emojiMap.get('🏠');
+      if (!namazEmojiId) namazEmojiId = emojiMap.get('🏠') || emojiMap.get('🧠') || Array.from(emojiMap.values())[0];
       
       // Ораза (Moon fallback to star if not exists)
       let orazaEmojiId = emojiMap.get('🌙');
-      if (!orazaEmojiId) orazaEmojiId = emojiMap.get('⭐️');
+      if (!orazaEmojiId) orazaEmojiId = emojiMap.get('⭐️') || emojiMap.get('🧠') || Array.from(emojiMap.values())[0];
 
       // Намаз тақырыбы
       const namazTopic = await ctx.telegram.createForumTopic(
         chatId, 
-        namazEmojiId ? 'Намаз' : '🕌 Намаз', 
+        'Намаз', 
         namazEmojiId ? { icon_custom_emoji_id: namazEmojiId } : undefined
       );
 
       // Ораза тақырыбы
       const orazaTopic = await ctx.telegram.createForumTopic(
         chatId, 
-        orazaEmojiId ? 'Ораза' : '🌙 Ораза', 
+        'Ораза', 
         orazaEmojiId ? { icon_custom_emoji_id: orazaEmojiId } : undefined
       );
 
@@ -450,10 +520,13 @@ export function setupBot() {
     const chatId = ctx.from.id;
     try {
       const emojiMap = await getCustomEmojiMap(ctx.telegram);
-      const brainId = emojiMap.get('🧠');
+      let brainId = emojiMap.get('🧠');
+      if (!brainId) {
+        brainId = emojiMap.get('📝') || emojiMap.get('❓') || Array.from(emojiMap.values())[0];
+      }
       const topic = await ctx.telegram.createForumTopic(
         chatId, 
-        brainId ? 'Жаңа тақырып' : '🧠 Жаңа тақырып',
+        'Жаңа тақырып',
         brainId ? { icon_custom_emoji_id: brainId } : undefined
       );
       await ctx.reply(`✅ Жаңа топик құрылды! Thread ID: ${topic.message_thread_id}. Енді сол жерге жазыңыз.`);
@@ -501,7 +574,7 @@ export function setupBot() {
           chat_id: chatId,
           draft_id: draftId,
           message_thread_id: targetThreadId,
-          text: '⏳ <i>Ойланып жатырмын...</i>',
+          text: formatStatusMessage('Ойлану'),
           parse_mode: 'HTML'
         });
       } catch (e) {
@@ -525,12 +598,11 @@ export function setupBot() {
           if (abortController.signal.aborted) return;
           const formatted = quotePrefix + formatTelegramMessage(currentFullText);
           try {
-            await ctx.telegram.callApi('sendMessageDraft', {
+            await ctx.telegram.callApi('sendRichMessageDraft', {
               chat_id: chatId,
               draft_id: draftId,
               message_thread_id: targetThreadId,
-              text: formatted,
-              parse_mode: 'HTML'
+              rich_message: { html: formatted }
             });
           } catch(e) {}
         },
@@ -546,8 +618,10 @@ export function setupBot() {
               chat_id: chatId,
               draft_id: draftId,
               message_thread_id: targetThreadId,
-              text: `⏳ ${statusText}`,
-              parse_mode: 'HTML'
+              text: formatStatusMessage(statusText),
+              parse_mode: 'HTML',
+              disable_web_page_preview: true,
+              link_preview_options: { is_disabled: true }
             });
           } catch (e) {}
         },
@@ -614,53 +688,41 @@ export function setupBot() {
         }
       }
 
-      let finalMessage = quotePrefix + formatTelegramMessage(answerData.answer, quranSources);
+      let botSentMsg: any = null;
 
       const extraOptions: any = { 
-        parse_mode: 'HTML',
         disable_web_page_preview: true,
         link_preview_options: { is_disabled: true }
       };
 
-      // Нақты сөйлемнен дәйексөз келтіру (Quote in Reply Parameters) алынып тасталды (UX Visual Bug fix)
       if (ctx.message && ctx.message.message_id) {
-        extraOptions.reply_parameters = {
-          message_id: ctx.message.message_id
-        };
+        extraOptions.reply_parameters = { message_id: ctx.message.message_id };
       }
 
       if (targetThreadId) {
         extraOptions.message_thread_id = targetThreadId;
       }
 
-      if (inlineKeyboard) {
-        Object.assign(extraOptions, inlineKeyboard);
+      const lf = answerData.answer.toLowerCase();
+      if (lf.includes('мүбәрак') || lf.includes('мубарак') || lf.includes('айт қабыл болсын') || lf.includes('айт кабыл болсын') || lf.includes('благословенн') || lf.includes('қабыл етсін')) {
+         extraOptions.message_effect_id = "5046509860389126442";
       }
 
-      // 7. Message Effects (Мерекелік Хабарлама Эффектілері — API 7.3+)
-      const lf = finalMessage.toLowerCase();
-      if (
-         lf.includes('мүбәрак') || 
-         lf.includes('мубарак') || 
-         lf.includes('айт қабыл болсын') || 
-         lf.includes('айт кабыл болсын') ||
-         lf.includes('благословенн') ||
-         lf.includes('қабыл етсін')
-      ) {
-         extraOptions.message_effect_id = "5046509860389126442"; // 🎉 Конфетти (Confetti effect)
-      }
-
-      // Финалдық хабарламаны жібереміз
-      let botSentMsg: any = null;
+      const txt = quotePrefix + formatTelegramMessage(answerData.answer, quranSources);
+      if (inlineKeyboard) Object.assign(extraOptions, inlineKeyboard);
+      
       try {
-        botSentMsg = await ctx.telegram.sendMessage(chatId, finalMessage, extraOptions);
-      } catch (replyError) {
-        console.error("[⚠️] HTML форматымен жіберу қатесі, таза мәтін жіберілуде:", replyError);
-        const plainText = finalMessage.replace(/<[^>]*>?/gm, '');
-        const plainOptions: any = { ...extraOptions };
-        delete plainOptions.parse_mode;
-        if (inlineKeyboard) Object.assign(plainOptions, inlineKeyboard);
-        botSentMsg = await ctx.telegram.sendMessage(chatId, plainText, plainOptions);
+          botSentMsg = await ctx.telegram.callApi('sendRichMessage', {
+              chat_id: chatId,
+              rich_message: { html: txt },
+              ...extraOptions
+          });
+      } catch(e) {
+          console.error(`[⚠️] sendRichMessage error:`, e);
+          const pOpts = { ...extraOptions };
+          delete pOpts.reply_parameters;
+          // Fallback if rich message fails
+          botSentMsg = await ctx.telegram.sendMessage(chatId, txt.replace(/<[^>]*>?/gm, ''), pOpts);
       }
 
       // Жадқа және дерекқорға сақтау
@@ -710,7 +772,7 @@ export function setupBot() {
 - Пайдаланушы: "Саудада ақшаны қалай өсімсіз аламыз?" -> 💼 Халал сауда ережесі
 
 Сұрақ: "${query}"
-Жауап: "${finalMessage}"`;
+Жауап: "${answerData?.answer || ''}"`;
             
             const aiPromise = ai.models.generateContent({
               model: 'gemini-3.1-flash-lite',
@@ -748,8 +810,9 @@ export function setupBot() {
               let customEmojiId: string | undefined = undefined;
 
               const parsed = extractEmojiAndText(newName);
+              const emojiMap = await getCustomEmojiMap(ctx.telegram);
+
               if (parsed.emoji) {
-                const emojiMap = await getCustomEmojiMap(ctx.telegram);
                 let matchedId = emojiMap.get(parsed.emoji);
                 
                 // Try fallback first if no direct match
@@ -760,19 +823,20 @@ export function setupBot() {
                   }
                 }
 
-                if (matchedId) {
-                  // Option 3 Path A: Valid Icon found
-                  // Use the ID for the icon and CLEAN text for the name
-                  customEmojiId = matchedId;
-                  cleanName = parsed.text || "Тақырып"; // Ensure text is not empty
-                  console.log(`[Stickers] Found match for ${parsed.emoji} -> ID ${matchedId}. Using clean title: "${cleanName}"`);
-                } else {
-                  // Option 3 Path B: No valid icon for this emoji
-                  // Keep the emoji in the text title, icon will remain default
-                  cleanName = newName;
-                  customEmojiId = undefined;
-                  console.log(`[Stickers] No match for ${parsed.emoji}. Keeping emoji in text: "${cleanName}"`);
+                // Егер табылса, соны қолданамыз. Табылмаса, дефолтты анимациялық смайликтің бірін таңдауға мәжбүрлейміз.
+                if (!matchedId) {
+                  matchedId = emojiMap.get('📝') || emojiMap.get('❓') || emojiMap.get('🧠') || Array.from(emojiMap.values())[0];
                 }
+
+                customEmojiId = matchedId;
+                cleanName = parsed.text || "Тақырып"; // Таза мәтін, смайликсіз
+                console.log(`[Stickers] Found match for ${parsed.emoji} -> ID ${matchedId}. Using clean title: "${cleanName}"`);
+              } else {
+                // Егер тақырыпта мүлдем смайлик табылмаса, бәрібір анимациялық смайликтердің бірін таңдауға мәжбүрлейміз
+                const defaultEmojiId = emojiMap.get('🧠') || emojiMap.get('📝') || emojiMap.get('❓') || Array.from(emojiMap.values())[0];
+                customEmojiId = defaultEmojiId;
+                cleanName = newName; // Смайликсіз таза атау
+                console.log(`[Stickers] No emoji in raw title. Forcing custom emoji ID: ${defaultEmojiId}. Title: "${cleanName}"`);
               }
 
               const editOptions: any = { name: cleanName };
@@ -800,7 +864,7 @@ export function setupBot() {
       }
 
     } catch (error: any) {
-      if (error?.message === 'AbortError') {
+      if (error?.message === 'AbortError' || error?.name === 'AbortError') {
          console.log(`[🛑] Message stream aborted for chat ${chatId}`);
          return; // Do nothing, another branch is handling it.
       }
@@ -814,6 +878,12 @@ export function setupBot() {
       let errorMessage = 'Кешіріңіз, жүйелік қателікке байланысты жауап бере алмаймын.';
       if (isCreditsError) {
         errorMessage = '⚠️ <b>Жүйелік қате (429 Resource Exhausted / Quota):</b>\n\nGoogle Cloud Vertex AI жүйесіндегі сұраныс квотасы таусылды немесе шегіне жетті. Біраз уақыттан соң қайталап көріңіз немесе Google Cloud Console арқылы квотаңызды көбейтіңіз.';
+      } else if (errorStr.includes("SAFETY")) {
+        errorMessage = 'Кешіріңіз, қауіпсіздік саясатына байланысты бұл сұраққа жауап бере алмаймын. (Safety block)';
+      } else if (errorStr.includes("denied access") || errorStr.includes("PERMISSION_DENIED") || errorStr.includes("403")) {
+        errorMessage = '⚠️ <b>API Қате (403 Forbidden):</b> Жүйенің API кілтіне (AI Studio немесе Vertex AI) рұқсат берілмей тұр.';
+      } else if (errorStr.includes("404") || errorStr.includes("not found")) {
+        errorMessage = '⚠️ <b>API Қате (404 Not Found):</b> Қолданыстағы AI моделі табылмады немесе бұл жобаға рұқсат етілмеген.';
       }
 
       const theDraftId = ctx.message ? ctx.message.message_id : Date.now();
@@ -839,7 +909,7 @@ export function setupBot() {
         chat_id: chatId,
         draft_id: draftId,
         message_thread_id: targetThreadId,
-        text: '⏳ <i>Дауыстық хабарлама өңделуде...</i>',
+        text: formatStatusMessage('Дыбысты талдау'),
         parse_mode: 'HTML'
       });
 
@@ -874,7 +944,7 @@ export function setupBot() {
         chat_id: chatId,
         draft_id: draftId,
         message_thread_id: targetThreadId,
-        text: '⏳ <i>Дыбыс мәтінге айналды. Мәтіндегі қателіктер түзетілуде...</i>',
+        text: formatStatusMessage('Мәтінді түзету'),
         parse_mode: 'HTML'
       });
 
@@ -950,16 +1020,17 @@ export function setupBot() {
        }
     }
 
-    // 3. Ескі бот жауабын тауып, стримингті бастау
+    // 3. Ескі бот жауабын тауып, оны өшіру және жаңа хабарлама ретінде стримингті бастау
     let currentBotMsgId = botMsgId;
 
     if (currentBotMsgId) {
        try {
-           await ctx.telegram.editMessageText(chatId, currentBotMsgId, undefined, '⏳ <i>Сұрақ өзгертілді, жаңа жауап дайындалуда...</i>', { parse_mode: 'HTML' });
+           await ctx.telegram.deleteMessage(chatId, currentBotMsgId);
+           console.log(`[🗑️] Deleted previous bot response message ${currentBotMsgId} to send a fresh one`);
        } catch(e) {
-           console.warn("[⚠️] Could not edit previous bot message:", e);
-           currentBotMsgId = undefined; // Fallback to new message
+           console.warn("[⚠️] Could not delete previous bot message:", e);
        }
+       currentBotMsgId = undefined; // Force sending a new message with three dots animation and no reply, as per User's request
     }
 
     const abortController = new AbortController();
@@ -989,10 +1060,11 @@ export function setupBot() {
           if (abortController.signal.aborted) return;
           const formatted = formatTelegramMessage(currentFullText);
           try {
+            if (formatted.length > 4000) return;
             if (currentBotMsgId) {
-               await ctx.telegram.editMessageText(chatId, currentBotMsgId, undefined, formatted, { parse_mode: 'HTML' });
+               await ctx.telegram.callApi('editMessageText', { chat_id: chatId, message_id: currentBotMsgId, rich_message: { html: formatted }, disable_web_page_preview: true, link_preview_options: { is_disabled: true } });
             } else {
-               await ctx.telegram.callApi('sendMessageDraft', { chat_id: chatId, draft_id: draftId, message_thread_id: targetThreadId, text: formatted, parse_mode: 'HTML' });
+               await ctx.telegram.callApi('sendRichMessageDraft', { chat_id: chatId, draft_id: draftId, message_thread_id: targetThreadId, rich_message: { html: formatted } });
             }
           } catch(e) {}
         },
@@ -1004,11 +1076,11 @@ export function setupBot() {
              currentActionStatus = 'typing';
           }
           try {
-            const txt = `⏳ ${statusText}`;
+            const txt = formatStatusMessage(statusText);
             if (currentBotMsgId) {
-               await ctx.telegram.editMessageText(chatId, currentBotMsgId, undefined, txt, { parse_mode: 'HTML' });
+               await ctx.telegram.editMessageText(chatId, currentBotMsgId, undefined, txt, { parse_mode: 'HTML', disable_web_page_preview: true, link_preview_options: { is_disabled: true } });
             } else {
-               await ctx.telegram.callApi('sendMessageDraft', { chat_id: chatId, draft_id: draftId, message_thread_id: targetThreadId, text: txt, parse_mode: 'HTML' });
+               await ctx.telegram.callApi('sendMessageDraft', { chat_id: chatId, draft_id: draftId, message_thread_id: targetThreadId, text: txt, parse_mode: 'HTML', disable_web_page_preview: true, link_preview_options: { is_disabled: true } });
             }
           } catch (e) {}
         },
@@ -1061,37 +1133,45 @@ export function setupBot() {
         }
       }
 
-      let finalMessage = formatTelegramMessage(answerData.answer, quranSources);
-
-      const extraOptions: any = { parse_mode: 'HTML', disable_web_page_preview: true, link_preview_options: { is_disabled: true } };
-      if (inlineKeyboard) Object.assign(extraOptions, inlineKeyboard);
+      const extraOptions: any = { disable_web_page_preview: true, link_preview_options: { is_disabled: true } };
       
-      const lf = finalMessage.toLowerCase();
+      const lf = answerData.answer.toLowerCase();
       if (lf.includes('мүбәрак') || lf.includes('мубарак') || lf.includes('айт қабыл болсын') || lf.includes('айт кабыл болсын') || lf.includes('қабыл етсін')) {
          extraOptions.message_effect_id = "5046509860389126442";
       }
 
+      if (inlineKeyboard) Object.assign(extraOptions, inlineKeyboard);
+
+      const txt = formatTelegramMessage(answerData.answer, quranSources);
+
       let botSentMsg: any = null;
       try {
-        if (currentBotMsgId) {
-           botSentMsg = await ctx.telegram.editMessageText(chatId, currentBotMsgId, undefined, finalMessage, extraOptions);
-        } else {
-           extraOptions.reply_parameters = { message_id: draftId };
-           if (targetThreadId) extraOptions.message_thread_id = targetThreadId;
-           botSentMsg = await ctx.telegram.sendMessage(chatId, finalMessage, extraOptions);
-        }
-      } catch (replyError: any) {
-        try {
-            const plainText = finalMessage.replace(/<[^>]*>?/gm, '');
-            const plainOptions: any = { ...extraOptions };
-            delete plainOptions.parse_mode;
-            if (inlineKeyboard) Object.assign(plainOptions, inlineKeyboard);
-            if (currentBotMsgId) {
-                botSentMsg = await ctx.telegram.editMessageText(chatId, currentBotMsgId, undefined, plainText, plainOptions);
-            } else {
-                botSentMsg = await ctx.telegram.sendMessage(chatId, plainText, plainOptions);
-            }
-        } catch(e) {}
+         if (currentBotMsgId) {
+             botSentMsg = await ctx.telegram.callApi('editMessageText', {
+                 chat_id: chatId,
+                 message_id: currentBotMsgId,
+                 rich_message: { html: txt },
+                 ...extraOptions
+             });
+         } else {
+             if (draftId && !currentBotMsgId) extraOptions.reply_parameters = { message_id: draftId };
+             if (targetThreadId) extraOptions.message_thread_id = targetThreadId;
+             botSentMsg = await ctx.telegram.callApi('sendRichMessage', {
+                 chat_id: chatId,
+                 rich_message: { html: txt },
+                 ...extraOptions
+             });
+         }
+      } catch(e) {
+         console.error(`[⚠️] submit rich message error:`, e);
+         const pOpts = { ...extraOptions };
+         delete pOpts.reply_parameters;
+         const pText = txt.replace(/<[^>]*>?/gm, '');
+         if (currentBotMsgId) {
+             botSentMsg = await ctx.telegram.editMessageText(chatId, currentBotMsgId, undefined, pText, pOpts);
+         } else {
+             botSentMsg = await ctx.telegram.sendMessage(chatId, pText, pOpts);
+         }
       }
 
       if (botSentMsg && botSentMsg !== true) {
@@ -1104,7 +1184,7 @@ export function setupBot() {
       }
 
     } catch (err: any) {
-        if (err?.message === 'AbortError') {
+        if (err?.message === 'AbortError' || err?.name === 'AbortError') {
            console.log(`[🛑] Edited message stream aborted for chat ${chatId}`);
            return;
         }

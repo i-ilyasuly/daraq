@@ -93,17 +93,18 @@ describe('aiService (Agentic RAG)', () => {
       const res = await generateAgentAnswerStream('chat_2', 'намаз деген не?', onChunk, onAction);
 
       // Verify Actions
-      expect(onAction).toHaveBeenCalledWith('🔍 Қажетті дереккөздерді қарастырудамын...');
-      expect(onAction).toHaveBeenCalledWith('✍️ Шешімді қорытындылап, жауапты рәсімдеудемін...');
+      expect(onAction).toHaveBeenCalledWith('Дереккөздерден іздеу');
+      expect(onAction).toHaveBeenCalledWith('Жауапты қалыптастыру');
       
       // Verify book search was called with query
       expect(searchService.searchAnswers).toHaveBeenCalledWith('намаз деген не?', undefined);
       
       // Verify final response
-      expect(onChunk).toHaveBeenCalledTimes(2);
+      expect(onChunk).toHaveBeenCalledTimes(3);
       expect(onChunk).toHaveBeenNthCalledWith(1, 'This is ');
       expect(onChunk).toHaveBeenNthCalledWith(2, 'This is about Namaz.');
-      expect(res.answer).toBe('This is about Namaz.');
+      expect(onChunk).toHaveBeenNthCalledWith(3, expect.stringContaining('This is about Namaz.'));
+      expect(res.answer).toContain('This is about Namaz.');
       expect(res.sources).toEqual(mockSearchResults);
     });
 
@@ -133,8 +134,8 @@ describe('aiService (Agentic RAG)', () => {
       const res = await generateAgentAnswerStream('chat_4', '2:183 аяты', onChunk, onAction);
 
       // Verify actions
-      expect(onAction).toHaveBeenCalledWith('🔍 Қажетті дереккөздерді қарастырудамын...');
-      expect(onAction).toHaveBeenCalledWith('✍️ Шешімді қорытындылап, жауапты рәсімдеудемін...');
+      expect(onAction).toHaveBeenCalledWith('Дереккөздерден іздеу');
+      expect(onAction).toHaveBeenCalledWith('Жауапты қалыптастыру');
       
       // Verify Quran service was called
       expect(quranService.fetchSingleVerse).toHaveBeenCalledWith('2:183');
@@ -176,16 +177,13 @@ describe('aiService (Agentic RAG)', () => {
       expect(db.doc).toHaveBeenCalledWith('12345');
     });
 
-    it('handles errors gracefully', async () => {
+    it('handles errors gracefully by throwing', async () => {
       (generateContentStreamFixed as jest.Mock).mockRejectedValue(new Error('Network error'));
       
       const onChunk = jest.fn();
       const onAction = jest.fn();
 
-      const res = await generateAgentAnswerStream('chat_3', 'hello?', onChunk, onAction);
-
-      expect(res.answer).toContain('Кешіріңіз');
-      expect(res.sources).toEqual([]);
+      await expect(generateAgentAnswerStream('chat_3', 'hello?', onChunk, onAction)).rejects.toThrow('Network error');
     });
 
     it('uses fast track semantic cache hit and paraphrases the response using LLM instead of returning verbatim', async () => {
@@ -218,7 +216,7 @@ describe('aiService (Agentic RAG)', () => {
       );
 
       // Verify onAction was called with paraphrasing/processing status
-      expect(onAction).toHaveBeenCalledWith('👉 Бұрынғы жауаптар негізінде жылдам қорытындылаудамын...');
+      expect(onAction).toHaveBeenCalledWith('Контексті біріктіру');
 
       // Verify LLM was asked to restructure/paraphrase the cached answer
       expect(generateContentStreamFixed).toHaveBeenCalledWith(expect.objectContaining({

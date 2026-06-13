@@ -20,6 +20,13 @@ export const KAZ_SURAHS: { [key: string]: number } = {
  */
 export function formatTelegramMessage(text: string, quranSources: any[] = []): string {
   let formatted = text;
+
+  // :::collapse title="..."\n...\n::: маркерлерін өңдеу (Telegram HTML-дегі жиналатын блокқа айналдыру)
+  const collapseRegex = /:::collapse\s+title="([^"]+)"\s*(?:\r?\n)?([\s\S]*?):::/g;
+  formatted = formatted.replace(collapseRegex, (match, title, content) => {
+    return `<blockquote expandable><b>${title}</b>\n${content.trim()}</blockquote>`;
+  });
+
   formatted = formatted.replace(/<br\s*\/?>/gi, '\n');
   formatted = formatted.replace(/<\/p>/gi, '\n\n').replace(/<p>/gi, '');
   

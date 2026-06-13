@@ -21,180 +21,7 @@ function tryGetDomain(urlStr: string): string {
 }
 
 
-export interface RouterResult {
-  intent: 'CHITCHAT' | 'KNOWLEDGE_SEARCH';
-  is_complete: boolean;
-  clarification_prompt: string;
-  refined_query: string;
-}
-
-async function classifyIntent(query: string, history: {role: string, parts: any[]}[]): Promise<RouterResult> {
-  const clean = query.trim().toLowerCase();
-
-  // If the query is incredibly short and matches greetings/thanks directly to optimize latency:
-  const shortChitchat = [
-    'сәлем', 'салем', 'ассалау', 'ассаламу', 'алейкум', 'әлейкум', 'қалайсың', 'қалайсыз', 'қалайсын', 'амансыз',
-    'рахмет', 'рақмет', 'ризамын', 'алғыс',
-    'спасибо', 'благодарю', 'привет', 'здравствуйте', 'салам',
-    'сен кімсің', 'сен кімсін', 'атың кім',
-    'сау бол', 'сау болыңыз', 'сау болыныз', 'пока', 'до свидания',
-    'окей', 'ok', 'жарайды'
-  ];
-  if (clean.length < 15 && shortChitchat.some(kw => clean.includes(kw))) {
-    return {
-      intent: 'CHITCHAT',
-      is_complete: true,
-      clarification_prompt: '',
-      refined_query: query
-    };
-  }
-
-  try {
-    console.log(`\n[🔍 ROUTER] Analyzing query for intent & completeness using Gemini... Query: "${query}"`);
-
-    const formattedHistoryText = history
-      .slice(-10) // analyze the last 10 turns to avoid token inflation
-      .map(h => `${h.role === 'model' ? 'Бот' : 'Пайдаланушы'}: "${h.parts[0].text}"`)
-      .join('\n');
-
-    const promptText = `Сен — Daraq діни ассистент жүйесінің ақылды роутері және талдаушысысың. Пайдаланушының жаңа сұрағын чат тарихымен бірге талдап, тиісті санатты, сұрақтың толықтығын, қажет болса нақтылау сұрағын және қайта құрылған сұранысты белгіле.
-
-ЖҰМЫС ШЕҢБЕРІ мен ЕРЕЖЕЛЕРІ:
-1. 'intent':
-   - 'CHITCHAT': Пайдаланушы сәлемдесе, алғыс айтса, боттың атын/мүмкіндіктерін сұраса немесе эмоциялық қысқа пікір білдірсе.
-   - 'KNOWLEDGE_SEARCH': діни білім, пәтуалар, шариғат ережелері бойынша сұрақтар.
-
-2. 'is_complete' (тек KNOWLEDGE_SEARCH үшін маңызды):
-   - Пайдаланушы тым жалпылама, нақты белгісіз мәселе қойса (мысалы: "Дәрет бұзыла ма?", "Ораза бұзыла ма?", "Намазым қабыл ма?"), оны 'is_complete: false' деп бағала. Бізге нақты жағдайды (мұрын қанау, ұйықтау, тіс жуу т.б.) білу шарт.
-   - Егер пайдаланушы бұған дейінгі боттың нақтылауына жауап берсе (мысалы, бұрын "Ораза бұзыла ма?" деген, бот нақтылау сұраған, енді ол "Тіс жудым/дәрі іштім" немесе "Еріксіз тамақ жұтып қойдым" дейді), бұл сұрақ толықтырылды деп санап, 'is_complete: true' деп бер.
-   - Егер сұрақтың өзінде бірден нақты оқиға/іс-әрекет сипатталса (мысалы: "Жыласа дәрет бұзыла ма?", "Көз жасы дәретке әсер ете ме?"), бұл толық сұрақ. 'is_complete: true' деп бер.
-   - ТЕК CHITCHAT немесе Құран аяттарына тікелей сілтейтін сұрақтар үшін 'is_complete: true' болсын.
-
-3. 'clarification_prompt':
-   - Егер 'is_complete: false' болса, пайдаланушы сұраған тілде (Қазақша, Орысша немесе Ағылшынша) сыпайы, жұмсақ түрде дәлелдемелі бапты анықтау сұрағын жаз. Сұрақта оған балама мысалдарды көрсетіп бағытта (мысалы: "Дәретіңізді дәл қандай жағдай бұзды деп ойлайсыз? Жел шығуы, мұрын қанауы немесе ұйықтау сияқты нақты не болғанын сипаттап берсеңіз, сізге дұрыс пәтуа тауып беремін. 😊").
-   - 'is_complete: true' болса, бұл өріс бос ("") болсын.
-
-4. 'refined_query':
-   - Егер 'is_complete: true' болса, чат тарихындағы бастапқы жалпы сұрақты және пайдаланушының жаңа жауаптарын біріктіріп, ең нақты, қысқа діни іздеу сұранысын (refined query) жаса.
-   - Мысалы: Пайдаланушы "Ораза бұзыла ма?" деп бастап, кейін "Тіс жусам" десе, refined_query: "Тіс жуғанда ораза бұзыла ма" деп құрастырылсын.
-   - Сұрақ тілі сұрақ қойылған тілмен (Қазақша/Орысша/Ағылшынша) дәл СӘЙКЕС БОЛСЫН.
-
-===
-ЖҰМЫС ҮЛГІЛЕРІ (Few-Shot Examples):
-
-Сұрақ: "Дәрет бұзыла ма?"
-Чат тарихы: (бос)
-Нәтиже:
-{
-  "intent": "KNOWLEDGE_SEARCH",
-  "is_complete": false,
-  "clarification_prompt": "Дәретіңізді дәл қандай жағдай бұзды деп ойлайсыз? Қан ағуы, жел шығуы немесе ұйықтап қалу өкілі сияқты нақты бір оқиға болды ма? Сипаттап жазсаңыз, нақты жауап табамын. 😊",
-  "refined_query": ""
-}
-
-Сұрақ: "мұрыннан қан шықса"
-Чат тарихы:
-Пайдаланушы: "Дәрет бұзыла ма?"
-Бот: "Дәретіңізді дәл қандай жағдай бұзды деп ойлайсыз?"
-Нәтиже:
-{
-  "intent": "KNOWLEDGE_SEARCH",
-  "is_complete": true,
-  "clarification_prompt": "",
-  "refined_query": "мұрыннан қан аққанда дәрет бұзыла ма"
-}
-
-Сұрақ: "Нарушается ли омовение?"
-Чат тарихы: (бос)
-Нәтиже:
-{
-  "intent": "KNOWLEDGE_SEARCH",
-  "is_complete": false,
-  "clarification_prompt": "Опишите, пожалуйста, какая именно ситуация произошла? Например, выделилась ли кровь, был ли сон или произошло что-то другое? Это поможет мне найти точный ответ по мазхабу Ханафи. 😊",
-  "refined_query": ""
-}
-
-Сұрақ: "текла кровь"
-Чат тарихы:
-Пайдаланушы: "Нарушается ли омовение?"
-Бот: "Опишите, пожалуйста, какая именно ситуация произошла?"
-Нәтиже:
-{
-  "intent": "KNOWLEDGE_SEARCH",
-  "is_complete": true,
-  "clarification_prompt": "",
-  "refined_query": "Нарушается ли омовение при выделении крови"
-}
-
-===
-Пайдаланушы хабарламасы: "${query}"
-Чат тарихы:
-${formattedHistoryText || '(бос)'}`;
-
-    const response = await generateContentFixed({
-      model: GEMINI_INTENT_MODEL,
-      contents: [{ role: 'user', parts: [{ text: promptText }] }],
-      config: {
-        temperature: 0.1,
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            intent: {
-              type: Type.STRING
-            },
-            is_complete: {
-              type: Type.BOOLEAN
-            },
-            clarification_prompt: {
-              type: Type.STRING
-            },
-            refined_query: {
-              type: Type.STRING
-            }
-          },
-          required: ["intent", "is_complete", "clarification_prompt", "refined_query"]
-        }
-      }
-    });
-
-    const resultText = (response.text || '').trim();
-    const parsedData = JSON.parse(resultText);
-
-    console.log(`[🔍 ROUTER] Analysis Result:`, JSON.stringify(parsedData, null, 2));
-
-    return {
-      intent: (parsedData.intent === 'CHITCHAT') ? 'CHITCHAT' : 'KNOWLEDGE_SEARCH',
-      is_complete: parsedData.is_complete === true,
-      clarification_prompt: parsedData.clarification_prompt || '',
-      refined_query: parsedData.refined_query || query
-    };
-
-  } catch (error: any) {
-    console.error(`[❌ ROUTER ERROR] Failed to classify intent with GenAI, fallback to heuristics:`, error.message || error);
-    
-    // Fallback logic
-    const religiousKeywords = [
-      'намаз', 'ораза', 'дәрет', 'дарет', 'аят', 'сүре', 'суре', 'хадис', 'үндеу', 'үкім', 'укім', 'парыз', 'сүннет', 'суннет', 
-      'уәжіп', 'уажип', 'халал', 'харам', 'мәкруһ', 'макрух', 'мустахаб', 'неке', 'талақ', 'талак', 'зекет', 'ажырасу', 'қаза', 'каза',
-      'сапар', 'мүсәпір', 'мусапир', 'құран', 'куран', 'аллаһ', 'аллах', 'құдай', 'кудай', 'пайғамбар', 'пайгамбар',
-      'күнә', 'куна', 'жәннат', 'жаннат', 'тозақ', 'тозак', 'ислам', 'дін', 'дин', 'иман', 'періште', 'периште', 'жұма', 'жума'
-    ];
-    let isReligious = false;
-    for (const kw of religiousKeywords) {
-      if (clean.includes(kw)) {
-        isReligious = true;
-        break;
-      }
-    }
-    return {
-      intent: isReligious ? 'KNOWLEDGE_SEARCH' : 'CHITCHAT',
-      is_complete: true,
-      clarification_prompt: '',
-      refined_query: query
-    };
-  }
-}
+import { classifyIntent, RouterResult } from './routerService';
 
 export interface AnswerResult {
   answer: string;
@@ -232,64 +59,7 @@ async function getChatHistory(chatId: string, threadId?: string | number) {
   }
 }
 
-/**
- * Хабарламаларды Firestore-ға сақтау
- */
-export async function rewindHistory(chatId: string, threadId: string | number | undefined, targetMsgId: number, newText: string): Promise<{deletedMsgIds: number[], updatedUserQuery: boolean}> {
-  const result = { deletedMsgIds: [] as number[], updatedUserQuery: false };
-  if (!db) return result;
-  try {
-    const threadStr = (threadId !== undefined && threadId !== null) ? String(threadId) : 'general';
-    const msgRef = db.collection('users').doc(chatId).collection('topics').doc(threadStr).collection('messages');
-    
-    // First, try to find the message by msgId
-    let snapshot = await msgRef.where('msgId', '==', targetMsgId).get();
-    
-    if (snapshot.empty) {
-      console.log(`[⚠️] Cannot rewind history, message ID ${targetMsgId} not found in Firestore. Older message format?`);
-      return result;
-    }
-    
-    const targetDoc = snapshot.docs[0];
-    const targetTimestamp = targetDoc.data().timestamp;
-
-    // We want to delete everything strictly AFTER this user message
-    const toDelete = await msgRef.where('timestamp', '>', targetTimestamp).get();
-    
-    const batch = db.batch();
-    toDelete.forEach((doc) => {
-      batch.delete(doc.ref);
-      const mId = doc.data().msgId;
-      if (mId && typeof mId === 'number') {
-         result.deletedMsgIds.push(mId);
-      }
-    });
-
-    // OVERWRITE the user message query per user's explicit request
-    batch.update(targetDoc.ref, { text: newText });
-
-    await batch.commit();
-    result.updatedUserQuery = true;
-    console.log(`[✅] Rewound history: Updated target message ${targetMsgId} and deleted ${toDelete.size} subsequent messages`);
-  } catch(e) {
-    console.error("[❌] Error rewinding history:", e);
-  }
-  return result;
-}
-
-export async function saveToChatHistory(chatId: string, role: 'user' | 'bot', text: string, threadId?: string | number, msgId?: number, replyToMsgId?: number) {
-  if (!db) return;
-  try {
-    const threadStr = (threadId !== undefined && threadId !== null) ? String(threadId) : 'general';
-    const payload: any = { role, text, timestamp: new Date() };
-    if (msgId) payload.msgId = msgId;
-    if (replyToMsgId) payload.replyToMsgId = replyToMsgId;
-    await db.collection('users').doc(chatId).collection('topics').doc(threadStr).collection('messages').add(payload);
-  } catch (error) {
-    console.error("[❌] Хабарламаны сақтау кезінде қате орын алды (Firestore Error):", error);
-  }
-}
-
+export { rewindHistory, saveToChatHistory } from './historyService';
 
 function isAskingForProof(q: string): boolean {
   const clean = q.toLowerCase();
@@ -922,7 +692,7 @@ ${contextText}
       });
 
       if (quranCitations.length > 0 || siteCitations.length > 0 || bookCitations.length > 0) {
-        const lines: string[] = ["<b>Дереккөздер:</b>"];
+        const lines: string[] = [];
         if (quranCitations.length > 0) {
           lines.push(`Құран: ${quranCitations.join(', ')}`);
         }
@@ -932,7 +702,7 @@ ${contextText}
         if (bookCitations.length > 0) {
           lines.push(`Кітаптар: ${bookCitations.join(', ')}`);
         }
-        const citations = `\n\n<blockquote expandable>${lines.join('\n')}</blockquote>\n`;
+        const citations = `\n\n<details><summary>Дереккөздер</summary>\n<blockquote>${lines.join('\n')}</blockquote>\n</details>\n`;
         answerText += citations;
         // Trigger onChunk one last time to push the citations
         onChunk(answerText);
@@ -986,85 +756,4 @@ export async function generateAnswer(
 /**
  * Сөйлеу транскрипциясын түзетуден кейінгі сыни тексеріс пен тазалау
  */
-export function validateAndCleanCorrection(rawText: string, correctedText: string): string {
-  let cleaned = correctedText.trim();
-  
-  // 1. "Шығыс:" немесе "Жауап:" сияқты префикстерді алып тастау
-  cleaned = cleaned.replace(/^(шығыс|жауап|түзетілген|corrected|output|кіріс|input)\s*:\s*/i, '');
-  cleaned = cleaned.trim();
-
-  // Егер тырнақшалардың ішіне алып берсе, оларды да тазалау
-  if (cleaned.startsWith('"') && cleaned.endsWith('"') && cleaned.length > 2) {
-    cleaned = cleaned.substring(1, cleaned.length - 1).trim();
-  }
-
-  const normalized = cleaned.toLowerCase();
-
-  // 2. Артық метамәлімет немесе модельдің өз диалогын анықтауға арналған қара тізім
-  const blacklistedTokens = [
-    'түсінікті',
-    'түзетуді қажет',
-    'мәтінді жіберсеңіз',
-    'нұсқауларға сай',
-    'сауатты түрде',
-    'қалпына келтіріп',
-    'сіздің сұрағыңыз',
-    'түзетілген нұсқа',
-    'сұраққа жауап',
-    'шығыс:',
-    'кіріс:',
-    'қатаң тыйымдар',
-    'нұсқаулық',
-    'нұсқауларға сәйкес',
-    'жасанды интеллект',
-    'моделісің'
-  ];
-
-  for (const token of blacklistedTokens) {
-    if (normalized.includes(token)) {
-      console.warn(`[⚠️ CORRECTOR GUARD] Blacklist token "${token}" triggered in corrected text! Falling back to raw.`);
-      return rawText;
-    }
-  }
-
-  // 3. Ұзындықты бақылау: Егер шикі мәтін қысқа болса, бірақ түзетілген мәтін одан бірнеше есе ұзын болып, нұсқаулықтарды шығарып жіберсе
-  if (rawText.length < 15 && cleaned.length > 80) {
-    console.warn(`[⚠️ CORRECTOR GUARD] Suspicious length expansion! Raw: ${rawText.length}, Corrected: ${cleaned.length}. Falling back to raw.`);
-    return rawText;
-  }
-
-  return cleaned;
-}
-
-/**
- * Дауыстық хабарлама транскрипциясын қазақша грамматикаға немесе діни терминдерге сай түзету
- */
-export async function correctTranscribedText(rawText: string): Promise<string> {
-  if (!rawText || rawText.trim().length === 0) return rawText;
-
-  try {
-    console.log(`[🎙 CORRECTOR] Correcting speech transcription with Gemini: "${rawText}"`);
-    const response = await generateContentFixed({
-      model: GEMINI_GENERATION_MODEL,
-      contents: [{ role: 'user', parts: [{ text: rawText }] }],
-      config: {
-        systemInstruction: TRANSCRIPTION_CORRECTION_PROMPT,
-        temperature: 0.1,
-        thinkingConfig: {
-          thinkingLevel: ThinkingLevel.MINIMAL
-        }
-      }
-    });
-
-    const result = (response.text || '').trim();
-    if (result && result.length > 0) {
-      const validated = validateAndCleanCorrection(rawText, result);
-      console.log(`[🎙 CORRECTOR] Successfully corrected transcription: "${validated}" (original: "${rawText}")`);
-      return validated;
-    }
-  } catch (error: any) {
-    console.error('[❌ CORRECTOR ERROR]: Failed to correct voice transcription, falling back to raw:', error.message || error);
-  }
-
-  return rawText;
-}
+export { validateAndCleanCorrection, correctTranscribedText } from './transcriptionService';

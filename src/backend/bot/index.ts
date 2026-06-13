@@ -28,370 +28,28 @@ import {
 
 export { getSourceInfo, setSourceInfo, getGroupInfo, setGroupInfo, renamedTopicsCache } from './botCache';
 
-export function formatStatusMessage(text: string): string {
-  // 1. Remove HTML tags if any (like <i>, </i>, <code>, </code>)
-  let clean = text.replace(/<[^>]*>?/gm, '');
+import { formatStatusMessage, splitTextIntoSafeChunks, processAndDeduplicateSources, buildKeyboard } from './messageBuilder';
+import { addWatermark } from './watermark';
+import { setupActionHandlers } from './actions';
 
-  // 2. Remove emojis and symbols: target common categories & specific emojis
-  clean = clean.replace(/[\u{1F300}-\u{1F9FF}]/gu, ''); // Miscellaneous Symbols and Pictographs, Supplemental Symbols and Pictographs
-  clean = clean.replace(/[\u{2700}-\u{27BF}]/gu, '');   // Dingbats
-  clean = clean.replace(/[\u{1F600}-\u{1F64F}]/gu, ''); // Emoticons
-  clean = clean.replace(/[\u{1F680}-\u{1F6FF}]/gu, ''); // Transport and Map Symbols
-  clean = clean.replace(/[\u{2600}-\u{26FF}]/gu, '');   // Miscellaneous Symbols
-  
-  // Specific emoji characters
-  clean = clean.replace(/[⏳⌛🔍👉✍️📖⚠️⚡️]/g, '');
-
-  // Strip variation selectors (\ufe0f)
-  clean = clean.replace(/\ufe0f/g, '');
-
-  // 3. Clean up leading/trailing whitespace
-  clean = clean.trim();
-
-  // Strip trailing ellipsis (...) if present
-  clean = clean.replace(/\.{3,}\s*$/, '');
-  clean = clean.trim();
-
-  // 4. Wrap with code tags for monospace style
-  return `<code>${clean}</code>`;
-}
-
-export function splitTextIntoSafeChunks(text: string, maxLength: number = 3800): string[] {
-    const chunks: string[] = [];
-    let current = '';
-    const paragraphs = text.split('\n\n');
-    for (const p of paragraphs) {
-        if (current.length + p.length + 2 > maxLength && current.length > 0) {
-            let chunkToPush = current;
-            const openB = (chunkToPush.match(/<b>/g) || []).length > (chunkToPush.match(/<\/b>/g) || []).length;
-            const openI = (chunkToPush.match(/<i>/g) || []).length > (chunkToPush.match(/<\/i>/g) || []).length;
-            const openQuote = (chunkToPush.match(/<blockquote(?: [^>]*)?>/g) || []).length > (chunkToPush.match(/<\/blockquote>/g) || []).length;
-            
-            if (openI) chunkToPush += '</i>';
-            if (openB) chunkToPush += '</b>';
-            if (openQuote) chunkToPush += '</blockquote>';
-            
-            chunks.push(chunkToPush);
-            
-            let prefix = '';
-            if (openQuote) prefix += '<blockquote>';
-            if (openB) prefix += '<b>';
-            if (openI) prefix += '<i>';
-            
-            let r = p;
-            while(r.length > maxLength) {
-                let slice = prefix + r.substring(0, maxLength - prefix.length);
-                // Also close tags for purely emergency hard slices
-                if (openI) slice += '</i>';
-                if (openB) slice += '</b>';
-                if (openQuote) slice += '</blockquote>';
-                chunks.push(slice);
-                r = r.substring(maxLength - prefix.length);
-            }
-            current = prefix + r;
-        } else {
-            current += (current ? '\n\n' : '') + p;
-        }
-    }
-    if (current) chunks.push(current);
-    return chunks;
-}
-
-export function processAndDeduplicateSources(rawSources: any[], answerText?: string): { quranSources: any[]; bookSources: any[] } {
-  if (!rawSources || rawSources.length === 0) {
-    return { quranSources: [], bookSources: [] };
+export async function sendRawTelegramApi(method: string, payload: any) {
+  const token = process.env.TELEGRAM_BOT_TOKEN;
+  if (!token) {
+    if (process.env.NODE_ENV === 'test') return;
+    throw new Error('TELEGRAM_BOT_TOKEN is not set');
   }
-
-  const quranSources: any[] = [];
-  const bookSources: any[] = [];
-
-  const seenQuran = new Set<string>();
-  const seenBook = new Set<string>();
-
-  for (const src of rawSources) {
-    if (!src) continue;
-
-    const isQuran = src.isQuran || 
-                    (src.book && src.book.endsWith('сүресі')) || 
-                    (src.url && src.url.toLowerCase().includes('quran.com'));
-
-    if (isQuran) {
-      const key = src.url || `${src.book}_${src.page}`;
-      if (!seenQuran.has(key)) {
-        seenQuran.add(key);
-         quranSources.push({
-          book: src.book,
-          page: src.page || 1,
-          url: src.url || 'https://quran.com',
-          isQuran: true,
-          text: src.text || "",
-          audio_url: src.audio_url
-        });
-      }
-    } else {
-      const chunkPages = src.pages && Array.isArray(src.pages) ? src.pages.map(Number) : [src.page || 1];
-      const key = `${src.book}_${chunkPages.join('_')}`;
-      if (!seenBook.has(key)) {
-        seenBook.add(key);
-        
-        bookSources.push({
-          book: src.book,
-          page: chunkPages[0] || 1,
-          pages: chunkPages,
-          imageUrl: src.imageUrl || "",
-          text: src.text || "",
-          score: src.score || 0
-        });
-      }
-    }
+  const url = `https://api.telegram.org/bot${token}/${method}`;
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  const data = await response.json();
+  if (!data.ok) {
+    console.error(`[Telegram API Error] ${method}:`, data);
+    throw new Error(`Telegram API Error: ${data.description}`);
   }
-
-  // Sort book sources by score descending to keep top scores first
-  bookSources.sort((a, b) => (b.score || 0) - (a.score || 0));
-
-  return { quranSources, bookSources };
-}
-
-export function buildKeyboard(quranSources: any[], bookSources: any[], quranPageIndex: number, pagId: string, query?: string): any {
-  const buttons: any[][] = [];
-
-  // Sort and identify the Top-2 highest scoring book chunks
-  const sortedBookSources = [...(bookSources || [])].sort((a, b) => (b.score || 0) - (a.score || 0));
-
-  // 1. Дәлел суреттері (діни кітап беттері) – әрқашан міндетті түрде жоғарыда
-  if (bookSources && bookSources.length > 0) {
-    if (bookSources.length === 1) {
-      const src = bookSources[0];
-      const pages = src.pages && Array.isArray(src.pages) ? src.pages : [src.page || 1];
-      
-      if (src.imageUrl || src.book) {
-        if (pages.length <= 1) {
-          const btnLabel = `🖼 Дәлел суретті көру (${src.page}-бет)`;
-          
-          // Find existing or create unique sourceId
-          let sourceId = '';
-          for (const [key, val] of sourceCache.entries()) {
-            if (val.book === src.book && val.page === src.page) {
-              sourceId = key;
-              break;
-            }
-          }
-          if (!sourceId) {
-            sourceId = uuidv4().substring(0, 8);
-            setSourceInfo(sourceId, {
-              book: src.book,
-              page: src.page,
-              pages: pages,
-              imageUrl: src.imageUrl || "",
-              query: query
-            });
-          }
-          
-          buttons.push([Markup.button.callback(btnLabel, `view_source_${sourceId}`)]);
-        } else {
-          // If 2 or more pages, it becomes a group button!
-          const groupId = uuidv4().substring(0, 8);
-          // Wait! Let's build GCS and image naming helper for GCS paths dynamically
-          const sourcesList = pages.map((p: number) => ({
-            book: src.book,
-            page: p,
-            imageUrl: src.imageUrl || "",
-            query: query
-          }));
-          setGroupInfo(groupId, sourcesList);
-
-          const btnLabel = `🖼 Барлық дәлел суреттерін көру (${pages.length} сурет)`;
-          buttons.push([Markup.button.callback(btnLabel, `view_srcgrp_${groupId}`)]);
-        }
-      }
-    } else {
-      // Multiple chunks! Let's collect all unique book/page combinations across all chunks
-      const allPages: { book: string; page: number; imageUrl: string; query?: string }[] = [];
-      const seen = new Set<string>();
-      
-      for (const src of sortedBookSources) {
-        const pages = src.pages && Array.isArray(src.pages) ? src.pages : [src.page || 1];
-        for (const p of pages) {
-          const key = `${src.book}_${p}`;
-          if (!seen.has(key)) {
-            seen.add(key);
-            allPages.push({
-              book: src.book,
-              page: p,
-              imageUrl: src.imageUrl || "",
-              query: query
-            });
-          }
-        }
-      }
-
-      if (allPages.length === 1) {
-        const item = allPages[0];
-        const btnLabel = `🖼 Дәлел суретті көру (${item.page}-бет)`;
-        
-        let sourceId = '';
-        for (const [key, val] of sourceCache.entries()) {
-          if (val.book === item.book && val.page === item.page) {
-            sourceId = key;
-            break;
-          }
-        }
-        if (!sourceId) {
-          sourceId = uuidv4().substring(0, 8);
-          setSourceInfo(sourceId, {
-            book: item.book,
-            page: item.page,
-            pages: [item.page],
-            imageUrl: item.imageUrl || "",
-            query: query
-          });
-        }
-        buttons.push([Markup.button.callback(btnLabel, `view_source_${sourceId}`)]);
-      } else {
-        const groupId = uuidv4().substring(0, 8);
-        setGroupInfo(groupId, allPages);
-
-        const btnLabel = `🖼 Барлық дәлел суреттерін көру (${allPages.length} сурет)`;
-        buttons.push([Markup.button.callback(btnLabel, `view_srcgrp_${groupId}`)]);
-      }
-    }
-  }
-
-  if (buttons.length === 0) return null;
-  return Markup.inlineKeyboard(buttons);
-}
-
-
-/**
- * Сурет үстіне су белгісін (Watermark) салатын функция
- */
-async function addWatermark(imageUrl: string, bookName: string, pageNumber: number): Promise<Buffer> {
-  const watermarkText = `Daraq: ${bookName}, ${pageNumber} бет`;
-  const svgText = `
-    <svg width="800" height="80">
-      <rect width="100%" height="100%" fill="rgba(0,0,0,0.6)" />
-      <text x="50%" y="50%" text-anchor="middle" dy=".3em" font-family="sans-serif" font-size="28" fill="white">
-        ${watermarkText}
-      </text>
-    </svg>
-  `;
-
-  let baseImageBuffer: Buffer;
-  let useFallbackWatermark = false;
-
-  try {
-    const bucket = storage.bucket(PROCESSED_BUCKET);
-    
-    // Мүмкін болатын барлық атау форматтары мен транслитерацияларды тізімдейміз
-    const safeBookName = bookName.replace(/[^a-zA-Zа-яА-Я0-9-_]/g, '_');
-    const latinBookRaw = transliterateToLatin(bookName);
-    const latinBookWithUnderscore = latinBookRaw.replace(/[^a-zA-Z0-9-_]/g, '_');
-    const latinBookNoSpacesOrPunctuation = latinBookRaw.replace(/[^a-zA-Z0-9]/g, '');
-
-    const possibleNames = [
-      // 1. Транслитерация бойынша (мысалы Oraza_qulshylygy)
-      `${latinBookWithUnderscore}/page_${pageNumber}.png`,
-      `${latinBookWithUnderscore}/page_${pageNumber}.jpg`,
-      `${latinBookWithUnderscore}/page_${pageNumber}.jpeg`,
-      // 2. Барлық бос орындар мүлдем жоқ транслитерация бойынша (мысалы Orazaqulshylygy немеse Zhumanamazy)
-      `${latinBookNoSpacesOrPunctuation}/page_${pageNumber}.png`,
-      `${latinBookNoSpacesOrPunctuation}/page_${pageNumber}.jpg`,
-      `${latinBookNoSpacesOrPunctuation}/page_${pageNumber}.jpeg`,
-      // 3. Кириллица бойынша тазаланған (мысалы Ораза_құлшылығы)
-      `${safeBookName}/page_${pageNumber}.png`,
-      `${safeBookName}/page_${pageNumber}.jpg`,
-      `${safeBookName}/page_${pageNumber}.jpeg`,
-      // 4. Тікелей берілген кітап атауы бойынша
-      `${bookName}/page_${pageNumber}.png`,
-      `${bookName}/page_${pageNumber}.jpg`,
-      `${bookName}/page_${pageNumber}.jpeg`,
-    ];
-
-    let fileToDownload: any = null;
-    let foundName = '';
-
-    for (const name of possibleNames) {
-      const f = bucket.file(name);
-      const [exists] = await f.exists();
-      if (exists) {
-        fileToDownload = f;
-        foundName = name;
-        break;
-      }
-    }
-
-    if (!fileToDownload) {
-      throw new Error(`Шынайы сурет GCS ішіндегі ізделген нұсқалардың ешбірінен табылмады. Қаралған жолдар: ${possibleNames.join(', ')}`);
-    }
-
-    console.log(`[🎯] Шынайы сурет табылды: ${foundName}`);
-    
-    // Суретті жүктеп алу
-    const [imageContent] = await fileToDownload.download();
-    baseImageBuffer = imageContent;
-    
-    // Сурет жарамдылығын sharp арқылы тексеру
-    await sharp(baseImageBuffer).metadata();
-  } catch (err) {
-    console.warn(`[⚠️] Жаппай суретті алу қатесі, fallback қосылады:`, err);
-    useFallbackWatermark = true;
-    
-    // Егер GCS-тен алынған сурет жарамсыз болса (немесе табылмаса), әдемі визуалды шаблон (placeholder) жасаймыз
-    const placeholderSvg = `
-      <svg width="800" height="600" xmlns="http://www.w3.org/2000/svg">
-        <!-- Background -->
-        <rect width="100%" height="100%" fill="#f4f1ea" />
-        
-        <!-- Outer Border -->
-        <rect x="20" y="20" width="760" height="560" fill="none" stroke="#8b7355" stroke-width="3" rx="15" />
-        
-        <!-- Inner Border -->
-        <rect x="35" y="35" width="730" height="530" fill="none" stroke="#d4c5b0" stroke-width="1.5" rx="8" />
-        
-        <!-- Corner Ornaments (Simplified) -->
-        <circle cx="35" cy="35" r="5" fill="#8b7355" />
-        <circle cx="765" cy="35" r="5" fill="#8b7355" />
-        <circle cx="35" cy="565" r="5" fill="#8b7355" />
-        <circle cx="765" cy="565" r="5" fill="#8b7355" />
-        
-        <!-- Center Book / Watermark placeholder -->
-        <text x="50%" y="40%" text-anchor="middle" font-family="serif" font-size="52" font-weight="bold" fill="#3e3222" letter-spacing="4">
-          DARAQ
-        </text>
-        <text x="50%" y="50%" text-anchor="middle" font-family="sans-serif" font-size="24" fill="#5c4d3c">
-          Бұл мәлімет кітапта бар, бірақ
-        </text>
-        <text x="50%" y="56%" text-anchor="middle" font-family="sans-serif" font-size="24" fill="#5c4d3c">
-          сандық нұсқасы (скан) жүктелмеген.
-        </text>
-        
-        <!-- Footer Info -->
-        <rect x="150" y="500" width="500" height="40" fill="#ede8df" rx="20" />
-        <text x="50%" y="527" text-anchor="middle" font-family="sans-serif" font-size="20" fill="#8b7355" font-weight="bold">
-          📖 ${bookName} | ${pageNumber}-бет
-        </text>
-      </svg>
-    `;
-    
-    baseImageBuffer = await sharp(Buffer.from(placeholderSvg))
-      .png()
-      .toBuffer();
-  }
-
-  // Егер жарамды сурет болса, оның төменгі жағына су белгісін саламыз
-  if (!useFallbackWatermark) {
-    return await sharp(baseImageBuffer)
-      .composite([
-        {
-          input: Buffer.from(svgText),
-          gravity: 'south'
-        }
-      ])
-      .jpeg()
-      .toBuffer();
-  } else {
-    return baseImageBuffer;
-  }
+  return data.result;
 }
 
 async function setupBotProfile(telegram: any) {
@@ -570,12 +228,11 @@ export function setupBot() {
       sendTypingStatus();
 
       try {
-        await ctx.telegram.callApi('sendMessageDraft', {
+        await sendRawTelegramApi('sendRichMessageDraft', {
           chat_id: chatId,
           draft_id: draftId,
           message_thread_id: targetThreadId,
-          text: formatStatusMessage('Ойлану'),
-          parse_mode: 'HTML'
+          rich_message: { html: `<tg-thinking>Ойлану...</tg-thinking>` }
         });
       } catch (e) {
         // Ignore API failures for draft
@@ -598,7 +255,7 @@ export function setupBot() {
           if (abortController.signal.aborted) return;
           const formatted = quotePrefix + formatTelegramMessage(currentFullText);
           try {
-            await ctx.telegram.callApi('sendRichMessageDraft', {
+            await sendRawTelegramApi('sendRichMessageDraft', {
               chat_id: chatId,
               draft_id: draftId,
               message_thread_id: targetThreadId,
@@ -614,14 +271,11 @@ export function setupBot() {
              currentActionStatus = 'typing';
           }
           try {
-            await ctx.telegram.callApi('sendMessageDraft', {
+            await sendRawTelegramApi('sendRichMessageDraft', {
               chat_id: chatId,
               draft_id: draftId,
               message_thread_id: targetThreadId,
-              text: formatStatusMessage(statusText),
-              parse_mode: 'HTML',
-              disable_web_page_preview: true,
-              link_preview_options: { is_disabled: true }
+              rich_message: { html: `<tg-thinking>${formatStatusMessage(statusText)}</tg-thinking>` }
             });
           } catch (e) {}
         },
@@ -712,7 +366,7 @@ export function setupBot() {
       if (inlineKeyboard) Object.assign(extraOptions, inlineKeyboard);
       
       try {
-          botSentMsg = await ctx.telegram.callApi('sendRichMessage', {
+          botSentMsg = await sendRawTelegramApi('sendRichMessage', {
               chat_id: chatId,
               rich_message: { html: txt },
               ...extraOptions
@@ -905,13 +559,12 @@ export function setupBot() {
       await ctx.telegram.sendChatAction(chatId, 'upload_voice', targetThreadId ? { message_thread_id: targetThreadId } : undefined);
       
       // Бот әрекеті: жағдай статустарының тізіміне дауысты өңдеуді қосу (осылайша жеке жаңа хабарлама ретінде шықпайды)
-      await ctx.telegram.callApi('sendMessageDraft', {
-        chat_id: chatId,
-        draft_id: draftId,
-        message_thread_id: targetThreadId,
-        text: formatStatusMessage('Дыбысты талдау'),
-        parse_mode: 'HTML'
-      });
+      await sendRawTelegramApi('sendRichMessageDraft', {
+          chat_id: chatId,
+          draft_id: draftId,
+          message_thread_id: targetThreadId,
+          rich_message: { html: `<tg-thinking>${formatStatusMessage('Дыбысты талдау')}</tg-thinking>` }
+        });
 
       // 2. Файл сілтемесін алу
       const fileId = ctx.message.voice.file_id;
@@ -929,24 +582,22 @@ export function setupBot() {
       const transcribedText = await transcribeKazakhVoice(audioBuffer);
 
       if (!transcribedText || transcribedText.trim().length === 0) {
-        await ctx.telegram.callApi('sendMessageDraft', {
+        await sendRawTelegramApi('sendRichMessageDraft', {
           chat_id: chatId,
           draft_id: draftId,
           message_thread_id: targetThreadId,
-          text: '❌ Дауыстан ештеңе түсіне алмадым. Баяу әрі нақтырақ сөйлеп көріңізші.',
-          parse_mode: 'HTML'
+          rich_message: { html: '❌ Дауыстан ештеңе түсіне алмадым. Баяу әрі нақтырақ сөйлеп көріңізші.' }
         });
         return;
       }
 
       // Түзету статусын көрсету
-      await ctx.telegram.callApi('sendMessageDraft', {
-        chat_id: chatId,
-        draft_id: draftId,
-        message_thread_id: targetThreadId,
-        text: formatStatusMessage('Мәтінді түзету'),
-        parse_mode: 'HTML'
-      });
+      await sendRawTelegramApi('sendRichMessageDraft', {
+          chat_id: chatId,
+          draft_id: draftId,
+          message_thread_id: targetThreadId,
+          rich_message: { html: `<tg-thinking>${formatStatusMessage('Мәтінді түзету')}</tg-thinking>` }
+        });
 
       // 4.5. Gemini арқылы мәтінді түзетіп алу
       const correctedText = await correctTranscribedText(transcribedText);
@@ -956,13 +607,12 @@ export function setupBot() {
 
     } catch (error: any) {
       console.error('[❌ VOICE TRANSCRIPTION ERROR]:', error);
-      await ctx.telegram.callApi('sendMessageDraft', {
-        chat_id: chatId,
-        draft_id: draftId,
-        message_thread_id: targetThreadId,
-        text: `❌ Дауыстық хабарламаны өңдеу барысында қателік орын алды: ${error.message || error}`,
-        parse_mode: 'HTML'
-      });
+      await sendRawTelegramApi('sendRichMessageDraft', {
+          chat_id: chatId,
+          draft_id: draftId,
+          message_thread_id: targetThreadId,
+          rich_message: { html: '❌ Дауысты өңдеу кезінде қателік кетті. Мәтін түрінде жауып көріңізші.' }
+        });
     }
   });
 
@@ -1062,9 +712,9 @@ export function setupBot() {
           try {
             if (formatted.length > 4000) return;
             if (currentBotMsgId) {
-               await ctx.telegram.callApi('editMessageText', { chat_id: chatId, message_id: currentBotMsgId, rich_message: { html: formatted }, disable_web_page_preview: true, link_preview_options: { is_disabled: true } });
+               await sendRawTelegramApi('editMessageText', { chat_id: chatId, message_id: currentBotMsgId, rich_message: { html: formatted }, disable_web_page_preview: true, link_preview_options: { is_disabled: true } });
             } else {
-               await ctx.telegram.callApi('sendRichMessageDraft', { chat_id: chatId, draft_id: draftId, message_thread_id: targetThreadId, rich_message: { html: formatted } });
+               await sendRawTelegramApi('sendRichMessageDraft', { chat_id: chatId, draft_id: draftId, message_thread_id: targetThreadId, rich_message: { html: formatted } });
             }
           } catch(e) {}
         },
@@ -1080,7 +730,12 @@ export function setupBot() {
             if (currentBotMsgId) {
                await ctx.telegram.editMessageText(chatId, currentBotMsgId, undefined, txt, { parse_mode: 'HTML', disable_web_page_preview: true, link_preview_options: { is_disabled: true } });
             } else {
-               await ctx.telegram.callApi('sendMessageDraft', { chat_id: chatId, draft_id: draftId, message_thread_id: targetThreadId, text: txt, parse_mode: 'HTML', disable_web_page_preview: true, link_preview_options: { is_disabled: true } });
+               await sendRawTelegramApi('sendRichMessageDraft', {
+                 chat_id: chatId,
+                 draft_id: draftId,
+                 message_thread_id: targetThreadId,
+                 rich_message: { html: txt }
+               });
             }
           } catch (e) {}
         },
@@ -1147,7 +802,7 @@ export function setupBot() {
       let botSentMsg: any = null;
       try {
          if (currentBotMsgId) {
-             botSentMsg = await ctx.telegram.callApi('editMessageText', {
+             botSentMsg = await sendRawTelegramApi('editMessageText', {
                  chat_id: chatId,
                  message_id: currentBotMsgId,
                  rich_message: { html: txt },
@@ -1156,7 +811,7 @@ export function setupBot() {
          } else {
              if (draftId && !currentBotMsgId) extraOptions.reply_parameters = { message_id: draftId };
              if (targetThreadId) extraOptions.message_thread_id = targetThreadId;
-             botSentMsg = await ctx.telegram.callApi('sendRichMessage', {
+             botSentMsg = await sendRawTelegramApi('sendRichMessage', {
                  chat_id: chatId,
                  rich_message: { html: txt },
                  ...extraOptions
@@ -1192,283 +847,7 @@ export function setupBot() {
     }
   });
 
-  bot.action('voice_resp', async (ctx) => {
-    try {
-      await ctx.answerCbQuery("❌ Кешіріңіз, дыбыстау қызметі уақытша өшірілген.", { show_alert: true });
-    } catch (e) {
-      console.warn("[VoiceAgent] Ignore answerCbQuery error:", e);
-    }
-  });
-
-  // 4. "noop" батырмасын ұстап алу (бос батырма, ештеңе істемейді, тек күтуді өшіреді)
-  bot.action('noop', async (ctx) => {
-    try {
-      await ctx.answerCbQuery();
-    } catch (e) {}
-  });
-
-  // 5. Құран пагинациясын басқару
-  bot.action(/pag_quran_(.+)_(.+)/, async (ctx) => {
-    try {
-      const pagId = ctx.match[1];
-      const newPageIdx = parseInt(ctx.match[2], 10);
-
-      const state = paginationCache.get(pagId);
-      if (!state) {
-        await ctx.answerCbQuery('Кешіріңіз, бұл батырманың мерзімі өтіп кеткен.', { show_alert: true });
-        return;
-      }
-
-      state.quranPageIndex = newPageIdx;
-      paginationCache.set(pagId, state);
-
-      const inlineKeyboard = buildKeyboard(state.quranSources, state.bookSources, newPageIdx, pagId);
-
-      await ctx.answerCbQuery();
-      if (inlineKeyboard) {
-        await ctx.editMessageReplyMarkup(inlineKeyboard.reply_markup);
-      }
-    } catch (error) {
-      console.error("[❌] Құран пагинациясы кезінде қате орын алды:", error);
-    }
-  });
-
-  // 6. "🖼 Дәлел суретті көру" батырмасын ұстап алу
-  bot.action(/view_source_(.+)/, async (ctx) => {
-    try {
-      const sourceId = ctx.match[1];
-      const sourceInfo = await getSourceInfo(sourceId);
-
-      if (!sourceInfo) {
-        await ctx.answerCbQuery('Кешіріңіз, дәлел суреті табылмады немесе ескірген.', { show_alert: true });
-        return;
-      }
-
-      await ctx.answerCbQuery('Суреттер дайындалуда...');
-      
-      const chatId = String(ctx.chat?.id || '');
-      const targetThreadId = (ctx.callbackQuery?.message as any)?.message_thread_id;
-      
-      let isWorking = true;
-      const sendPhotoStatus = async () => {
-        try {
-          if (isWorking) {
-            await ctx.telegram.sendChatAction(chatId, 'upload_photo', targetThreadId ? { message_thread_id: targetThreadId } : undefined);
-          }
-        } catch (e) {}
-      };
-      
-      const statusInterval = setInterval(sendPhotoStatus, 4000);
-      sendPhotoStatus();
-
-      try {
-        // Кросс-бет (Cross-Page) мәселесін анықтау
-        const pageList = sourceInfo.pages && sourceInfo.pages.length > 0 
-          ? sourceInfo.pages 
-          : [sourceInfo.page];
-
-        const cacheKey = `${sourceInfo.book}_${pageList.join(',')}`;
-        if (sourceUploadCache.has(cacheKey)) {
-           const cached = sourceUploadCache.get(cacheKey)!;
-           try {
-             if (cached.messageIds.length === 1) {
-               await ctx.telegram.callApi('copyMessage', {
-                 chat_id: chatId,
-                 from_chat_id: cached.chatId,
-                 message_id: cached.messageIds[0],
-                 message_thread_id: targetThreadId
-               });
-             } else {
-               await ctx.telegram.callApi('copyMessages', {
-                 chat_id: chatId,
-                 from_chat_id: cached.chatId,
-                 message_ids: cached.messageIds,
-                 message_thread_id: targetThreadId
-               });
-             }
-             isWorking = false;
-             clearInterval(statusInterval);
-             return;
-           } catch (e) {
-             console.log("[⚠️] Failed to copy cached target, falling back to re-upload", e);
-             sourceUploadCache.delete(cacheKey);
-           }
-        }
-
-      if (pageList.length <= 1) {
-        // Бір ғана бет болса, әдеттегідей жалғыз сурет ретінде жібереміз
-        const imageBuffer = await addWatermark(sourceInfo.imageUrl, sourceInfo.book, pageList[0]);
-        const sentMsg = await ctx.replyWithPhoto({ source: imageBuffer }, { caption: `📖 ${sourceInfo.book}, ${pageList[0]}-бет` });
-        sourceUploadCache.set(cacheKey, { chatId, messageIds: [sentMsg.message_id] });
-      } else {
-        // Екі немесе одан да көп бет болса (Cross-Page), оларды альбом (MediaGroup) ретінде жібереміз
-        console.log(`[📚 CROSS-PAGE] Processing ${pageList.length} pages for ${sourceInfo.book}: [${pageList.join(', ')}]`);
-        const results = await Promise.all(
-          pageList.map(async (pNum) => {
-            try {
-              // Сурет сілтемесіндегі "page_X.png"-ді тиісті бетке өзгертеміз
-              let pageUrl = sourceInfo.imageUrl || "";
-              if (pageUrl) {
-                pageUrl = pageUrl.replace(/page_\d+\.png/g, `page_${pNum}.png`);
-              }
-              const buffer = await addWatermark(pageUrl, sourceInfo.book, pNum);
-              return { buffer, pageNum: pNum };
-            } catch (err) {
-              console.error(`[❌] Бетті өңдеу қатесі (${sourceInfo.book}, бет ${pNum}):`, err);
-              return null;
-            }
-          })
-        );
-
-        const validResults = results.filter((r): r is { buffer: Buffer; pageNum: number } => r !== null);
-
-        if (validResults.length === 0) {
-          await ctx.reply('Кешіріңіз, ешқандай дәлел суретін дайындау мүмкін болмады.');
-          return;
-        }
-
-        const media = validResults.map(res => ({
-          type: 'photo' as const,
-          media: { source: res.buffer },
-          caption: `📖 ${sourceInfo.book}, ${res.pageNum}-бет`
-        }));
-
-        const sentMsgs = await ctx.replyWithMediaGroup(media);
-        if (Array.isArray(sentMsgs)) {
-          sourceUploadCache.set(cacheKey, { chatId, messageIds: sentMsgs.map(m => m.message_id) });
-        }
-      }
-
-      } catch (error) {
-        console.error("[❌] Суретті жүктеу немесе альбом жасау кезінде қате:", error);
-        await ctx.answerCbQuery('Суретті ашу кезінде қателік кетті.', { show_alert: true });
-      } finally {
-        isWorking = false;
-        clearInterval(statusInterval);
-      }
-    } catch (error) {
-      console.error("[❌] Әрекетті өңдеу қатесі:", error);
-    }
-  });
-
-  // 7. Бірнеше дәлел суретін бірге (Media Group) жіберетін батырманы ұстап алу
-  bot.action(/view_srcgrp_(.+)/, async (ctx) => {
-    try {
-      const groupId = ctx.match[1];
-      const sources = await getGroupInfo(groupId);
-
-      if (!sources || sources.length === 0) {
-        await ctx.answerCbQuery('Кешіріңіз, дәлел суреттері табылмады немесе ескірген.', { show_alert: true });
-        return;
-      }
-
-      await ctx.answerCbQuery('Дәлел суреттері дайындалуда...');
-
-      const chatId = String(ctx.chat?.id || '');
-      const targetThreadId = (ctx.callbackQuery?.message as any)?.message_thread_id;
-      
-      let isWorking = true;
-      const sendPhotoStatus = async () => {
-        try {
-          if (isWorking) {
-            await ctx.telegram.sendChatAction(chatId, 'upload_photo', targetThreadId ? { message_thread_id: targetThreadId } : undefined);
-          }
-        } catch (e) {}
-      };
-      
-      const statusInterval = setInterval(sendPhotoStatus, 4000);
-      sendPhotoStatus();
-
-      try {
-        const cacheKey = `grp_${groupId}`;
-        if (sourceUploadCache.has(cacheKey)) {
-           const cached = sourceUploadCache.get(cacheKey)!;
-           try {
-             if (cached.messageIds.length === 1) {
-               await ctx.telegram.callApi('copyMessage', {
-                 chat_id: chatId,
-                 from_chat_id: cached.chatId,
-                 message_id: cached.messageIds[0],
-                 message_thread_id: targetThreadId
-               });
-             } else {
-               await ctx.telegram.callApi('copyMessages', {
-                 chat_id: chatId,
-                 from_chat_id: cached.chatId,
-                 message_ids: cached.messageIds,
-                 message_thread_id: targetThreadId
-               });
-             }
-             isWorking = false;
-             clearInterval(statusInterval);
-             return;
-           } catch (e) {
-             console.log("[⚠️] Failed to copy cached target, falling back to re-upload", e);
-             sourceUploadCache.delete(cacheKey);
-           }
-        }
-
-        // Суреттерге су белгісін параллельді Promise.all арқылы қосу
-        const results = await Promise.all(
-          sources.map(async (src) => {
-            try {
-              let customUrl = src.imageUrl || "";
-              if (customUrl) {
-                customUrl = customUrl.replace(/page_\d+\.png/g, `page_${src.page}.png`);
-              }
-  
-              const buffer = await addWatermark(customUrl, src.book, src.page);
-              return {
-                buffer,
-                book: src.book,
-                page: src.page
-              };
-            } catch (err) {
-              console.error(`[❌] Суретке су белгісін қосу кезіндегі қате (${src.book}, бет ${src.page}):`, err);
-              return null;
-            }
-          })
-        );
-  
-        const imageBuffers = results.filter((res): res is { buffer: Buffer; book: string; page: number } => res !== null);
-  
-        if (imageBuffers.length === 0) {
-          await ctx.answerCbQuery('Кешіріңіз, ешқандай суретті жүктеу мүмкін болмады.', { show_alert: true });
-          return;
-        }
-  
-        // Media Group түрінде біріктіріп жібереміз
-        try {
-          const media = imageBuffers.map(img => ({
-            type: 'photo' as const,
-            media: { source: img.buffer },
-            caption: `📖 ${img.book}, ${img.page}-бет`
-          }));
-          const sentMsgs = await ctx.replyWithMediaGroup(media);
-          if (Array.isArray(sentMsgs)) {
-             sourceUploadCache.set(cacheKey, { chatId, messageIds: sentMsgs.map(m => m.message_id) });
-          }
-        } catch (mediaGroupError) {
-          console.warn("[⚠️] Media Group жіберу қатесі, суреттерді жеке-жеке жібереміз:", mediaGroupError);
-          // Fallback: send sequentially if Media Group fails
-          const messageIds: number[] = [];
-          for (const img of imageBuffers) {
-            const sentMsg = await ctx.replyWithPhoto({ source: img.buffer }, { caption: `📖 ${img.book}, ${img.page}-бет` });
-            messageIds.push(sentMsg.message_id);
-          }
-          sourceUploadCache.set(cacheKey, { chatId, messageIds });
-        }
-      } catch (error) {
-        console.error("[❌] Топтық суретті жүктеу немесе қате:", error);
-        await ctx.answerCbQuery('Суреттер топтамасын ашу кезінде қателік кетті.', { show_alert: true });
-      } finally {
-        isWorking = false;
-        clearInterval(statusInterval);
-      }
-    } catch (error) {
-      console.error("[❌] Дәлелдер тобын жүктеу кезінде қате:", error);
-    }
-  });
+  setupActionHandlers(bot);
 
   // Вэбхук арқылы немесе ұзақ сұрау арқылы қосу
   const isCloudRun = process.env.K_SERVICE !== undefined;

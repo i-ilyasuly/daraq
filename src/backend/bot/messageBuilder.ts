@@ -26,8 +26,36 @@ export function formatStatusMessage(text: string): string {
   clean = clean.replace(/\.{3,}\s*$/, '');
   clean = clean.trim();
 
-  // 4. Wrap with code tags for monospace style
-  return `<code>${clean}</code>`;
+  const lower = clean.toLowerCase();
+
+  // 4. Return beautifully styled text with premium custom animated tg-emojis depending on the phase
+  if (lower.includes('дереккөздерден іздеу') || lower.includes('дереккөздер')) {
+    return `<tg-emoji emoji-id="5370757754325574044">📚</tg-emoji> <b>Дереккөздерден іздеу...</b>`;
+  }
+  if (lower.includes('сайттардан іздеу') || lower.includes('іздеу')) {
+    return `<tg-emoji emoji-id="5370757754325574044">🔍</tg-emoji> <b>Сенімді сайттардан іздеу...</b>`;
+  }
+  if (lower.includes('біріктіру') || lower.includes('біріктіріп')) {
+    return `<tg-emoji emoji-id="5373248301149724125">🔗</tg-emoji> <b>Контексті біріктіру...</b>`;
+  }
+  if (lower.includes('қалыптастыру') || lower.includes('жауапты')) {
+    return `<tg-emoji emoji-id="5370903332023969502">✨</tg-emoji> <b>Жауапты қалыптастыру...</b>`;
+  }
+  if (lower.includes('дыбыс') || lower.includes('талдау')) {
+    return `<tg-emoji emoji-id="5373305459144924765">🎙️</tg-emoji> <b>Дыбысты талдау...</b>`;
+  }
+  if (lower.includes('түзету') || lower.includes('сипаттау')) {
+    return `<tg-emoji emoji-id="5370919293129074092">📝</tg-emoji> <b>Мәтінді түзету...</b>`;
+  }
+  if (lower.includes('өңдеу')) {
+    return `<tg-emoji emoji-id="5431448332142647704">⚙️</tg-emoji> <b>Ақпаратты өңдеу...</b>`;
+  }
+  if (lower.includes('ойлану') || lower === '') {
+    return `<tg-emoji emoji-id="5467649557452033038">🧠</tg-emoji> <b>Ойлану...</b>`;
+  }
+
+  // Beautiful premium default fallback with an active lightning bolt
+  return `<tg-emoji emoji-id="5431448332142647704">⚡️</tg-emoji> <b>${clean}...</b>`;
 }
 
 export function splitTextIntoSafeChunks(text: string, maxLength: number = 3800): string[] {
@@ -39,16 +67,16 @@ export function splitTextIntoSafeChunks(text: string, maxLength: number = 3800):
             let chunkToPush = current;
             const openB = (chunkToPush.match(/<b>/g) || []).length > (chunkToPush.match(/<\/b>/g) || []).length;
             const openI = (chunkToPush.match(/<i>/g) || []).length > (chunkToPush.match(/<\/i>/g) || []).length;
-            const openQuote = (chunkToPush.match(/<blockquote(?: [^>]*)?>/g) || []).length > (chunkToPush.match(/<\/blockquote>/g) || []).length;
+            const openQuote = (chunkToPush.match(/<aside(?: [^>]*)?>/g) || []).length > (chunkToPush.match(/<\/aside>/g) || []).length;
             
             if (openI) chunkToPush += '</i>';
             if (openB) chunkToPush += '</b>';
-            if (openQuote) chunkToPush += '</blockquote>';
+            if (openQuote) chunkToPush += '</aside>';
             
             chunks.push(chunkToPush);
             
             let prefix = '';
-            if (openQuote) prefix += '<blockquote>';
+            if (openQuote) prefix += '<aside>';
             if (openB) prefix += '<b>';
             if (openI) prefix += '<i>';
             
@@ -58,7 +86,7 @@ export function splitTextIntoSafeChunks(text: string, maxLength: number = 3800):
                 // Also close tags for purely emergency hard slices
                 if (openI) slice += '</i>';
                 if (openB) slice += '</b>';
-                if (openQuote) slice += '</blockquote>';
+                if (openQuote) slice += '</aside>';
                 chunks.push(slice);
                 r = r.substring(maxLength - prefix.length);
             }

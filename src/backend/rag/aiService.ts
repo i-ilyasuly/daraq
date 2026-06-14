@@ -59,7 +59,8 @@ async function getChatHistory(chatId: string, threadId?: string | number) {
   }
 }
 
-export { rewindHistory, saveToChatHistory } from './historyService';
+import { rewindHistory, saveToChatHistory } from './historyService';
+export { rewindHistory, saveToChatHistory };
 
 function isAskingForProof(q: string): boolean {
   const clean = q.toLowerCase();
@@ -262,7 +263,7 @@ export async function generateAgentAnswerStream(
         const dayOfWeekC = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Almaty" })).getDay();
         const fastCachePrompt = `Сен — Daraq, Ханафи мазһабының виртуалды ұстазысың. Пайдаланушы қойған сұраққа бұрын жауап берілген. Төмендегі дайын жауаптың мағынасын сақтай отырып, оны пайдаланушы үшін жаңадан, жылы әрі табиғи етіп қайта құрастырып бер.
 Ережелер:
-1. HTML ТЕГТЕРІН ҚОЛДАН: <b> (жуан мәтін), <i> (көлбеу мәтін), <blockquote> (дәйексөздер). Ескі жауаптағы Құран аяттарының аудармаларын, Хадистерді немесе ғалымдардың/кітаптардың тікелей үзінділерін («кітапта жазылған үзінділер») тауып, оларды міндетті түрде <blockquote>...</blockquote> тегтерінің ішіне ал! Ескі жауапта бұрыннан бар <blockquote>...</blockquote> дәйексөз форматтауларын мүлтіксіз сақтап, қайта құрастырғанда да дәйексөз ретінде қалдыр.
+1. HTML ТЕГТЕРІН ҚОЛДАН: <b> (жуан мәтін), <i> (көлбеу мәтін), <aside> (дәйексөздер). Ескі жауаптағы Құран аяттарының аудармаларын, Хадистерді немесе ғалымдардың/кітаптардың тікелей үзінділерін («кітапта жазылған үзінділер») тауып, оларды міндетті түрде <aside>...</aside> тегтерінің ішіне ал! Ескі жауапта бұрыннан бар <aside>...</aside> немесе <blockquote>...</blockquote> дәйексөз форматтауларын мүлтіксіз сақтап, қайта құрастырғанда да <aside>...</aside> дәйексөз ретінде қалдыр.
 2. Маркдаун белгілерін (мысалы, *, **) МҮЛДЕМ ҚОЛДАНБА. Тізімдер үшін қарапайым минус (-) сызықшасын немесе • (нүкте) таңбасын қолдан.
 3. Мәтін тым тығыз болмауы үшін абзацтар арасына кішігірім бос орын (жаңа жол) қалдыр.
 4. "Бұл туралы толық мәліметті... төмендегі батырманы басып..." деген сияқты БАТЫРМАҒА сілтейтін сөздерді АЛЫП ТАСТА, өйткені батырманы жүйе өзі қосады. Жай ғана жауапвтың өзін әдемілеп бер.
@@ -409,36 +410,37 @@ ${hit.answer}
     onAction('Дереккөздерден іздеу');
 
     const hasBeenRefined = searchInput !== query;
-    const bookResults = await searchAnswers(searchInput, hasBeenRefined ? undefined : vector);
 
-    const MIN_RELEVANCE_SCORE = 0.50;
-
-    // Evaluate relevance score from book search
-    const maxScore = bookResults.length > 0 ? Math.max(...bookResults.map(r => r.score || 0)) : 0;
-    const isModernIssue = /крипто|биткоин|vape|вейп|электронды темекі|электронные сигареты|интернет|онлайн|акция|маркетплейс|сетевой маркетинг|вакцина|пластикалық|пластическая/i.test(searchInput);
-
-    if (maxScore < MIN_RELEVANCE_SCORE || isModernIssue) {
-      console.log(`[🔍 Orchestration] Triggering search_official_kazakh_fatwas. Low relevance (${maxScore.toFixed(4)} < ${MIN_RELEVANCE_SCORE}) or modern issue.`);
+    // Parallel execution of Book Search and Web Search to minimize response latency
+    const bookSearchPromise = searchAnswers(searchInput, hasBeenRefined ? undefined : vector);
+    const webSearchPromise = (async () => {
       try {
-        const webResult = await getVerifiedFatwasContext(searchInput, onAction);
-        webSourcesJoined = webResult.text;
-        webSourcesList = webResult.sources;
-        
-        // Append web sources to usedSources list so they are saved / cached
-        webSourcesList.forEach(src => {
-          usedSources.push({
-            text: src.snippet,
-            book: "ҚМДБ Пәтуасы",
-            page: 1,
-            imageUrl: "",
-            score: 1.0,
-            url: src.url
-          });
-        });
+        return await getVerifiedFatwasContext(searchInput, onAction);
       } catch (err: any) {
-        console.error(`[🚨 Orchestration] search_official_kazakh_fatwas failed or timed out:`, err.message || err);
+        console.error(`[🚨 Orchestration] Parallel search_official_kazakh_fatwas failed or timed out:`, err.message || err);
+        return { text: '', sources: [] };
       }
-    }
+    })();
+
+    const [bookResults, webResult] = await Promise.all([
+      bookSearchPromise,
+      webSearchPromise
+    ]);
+
+    webSourcesJoined = webResult.text;
+    webSourcesList = webResult.sources;
+
+    // Append web sources to usedSources list so they are saved / cached
+    webSourcesList.forEach(src => {
+      usedSources.push({
+        text: src.snippet,
+        book: "ҚМДБ Пәтуасы",
+        page: 1,
+        imageUrl: "",
+        score: 1.0,
+        url: src.url
+      });
+    });
 
     // Now extract Quran references from everything we have gathered: searchInput, book chunks, and scraped web fatwas!
     const combinedTextsToParse = [
@@ -547,17 +549,17 @@ ${contextText}
 ⚠️ МАҢЫЗДЫ ЕРЕЖЕ СЕКЦИЯСЫ:
 Пайдаланушыға осы контекстте бар мәлімет аясында Ханафи мазһабының ұстазы ретінде (Persona-ға сәйкес) жауап бер.
 Егер жауапта Құраннан аяттар немесе дәлелдер келтірілетін болса (мейлі олар басқа кітаптардан немесе сайт мәтіндерінен табылса да), сен оларды міндетті түрде нақты Құран аяттарының дерегінен (Құран құралдары айқындап берген АРАБША және АУДАРМАСЫ бөлімдерінен) сәйкестендіріп тауып ал. Ешқашан аятты тек қазақша аударма күйінде жаза салма! Әрқашан алдымен арабшасын жазып, одан кейін ғана аудармасын және соңына тиісті форматтағы сілтемесін қос.
-Қосылатын аяттарды міндетті түрде бір <blockquote>...</blockquote> тегінің ішінде ерекшелеп, СТРИКТТІ түрде мына формат бойынша жаз (арабша мәтін мен аударманың арасында бос жол болсын, аудармадан кейін де бос жол тасталып, дәйексөз сілтемесі жаңа азат жолға астына жеке жазылсын):
-<blockquote>[АРАБША МӘТІН харакаттарымен]
+Қосылатын аяттарды міндетті түрде бір <aside>...</aside> тегінің ішінде ерекшелеп, СТРИКТТІ түрде мына формат бойынша жаз (арабша мәтін мен аударманың арасында бос жол болсын, аудармадан кейін де бос жол тасталып, дәйексөз сілтемесі жаңа азат жолға астына жеке жазылсын):
+<aside>[АРАБША МӘТІН харакаттарымен]
 
 «[АУДАРМАСЫН жақшаға алмай, тырнақшаның ішінде осылай жаз]»
 
-([СҮРЕ АТЫ] сүресі, [АЯТ НӨМІРІ]-аят (<a href="[АУДИО СІЛТЕМЕСІ]">тыңдау</a>) )</blockquote> (Ескерту: Пайдаланушыға көрсететін әрбір Құран аяты үшін аудио сілтемесі контекстте міндетті түрде берілген. Сондықтан кез келген аят үшін тыңдау сілтемесі бар нұсқаны 100% міндетті түрде таңдап жаз!).
+([СҮРЕ АТЫ] сүресі, [АЯТ НӨМІРІ]-аят (<a href="[АУДИО СІЛТЕМЕСІ]">тыңдау</a>) )</aside> (Ескерту: Пайдаланушыға көрсететін әрбір Құран аяты үшін аудио сілтемесі контекстте міндетті түрде берілген. Сондықтан кез келген аят үшін тыңдау сілтемесі бар нұсқаны 100% міндетті түрде таңдап жаз!).
 Егер табылған дереккөздерде ҚМДБ ресми сайтынан алынған қазіргі заманғы пәтуалар болса, соларға сүйеніп толық ресми және заманауи пәтуа үкімін түсіндіріп бер. Егер классикалық кітаптар да, заманауи пәтуалар да қатар табылса, екеуін біріктіріп ең жақсы жауап нұсқасын жаса.
 Егер ешқандай ақпарат табылмаса немесе контексте нақты жауап болмаса, онда нақты "Бұл мәлімет кітаптардан табылмады, сондықтан нақты жауап бере алмаймын" деп ашық айт. Жалған кітап атын немесе жауап ойлап таппа!
 ЖАУАПТЫҢ СОҢЫНДА ЕШҚАНДАЙ дереккөзді немесе кітап атын, бетін атап түсіндіретін үлкен сөйлемдер, сүйенген сайттарды немесе "Бұл мәліметтерді ҚМДБ-ның ресми... дайындадым" не "Бұл туралы толық мәліметті... бетінен тауып бердім" сияқты артық сөйлемдерді МҮЛДЕМ ЖАЗБА! Барлық дереккөздер мен қолданылған кітаптар соңында автоматты түрде дәйексөз ретінде қосылады. ЕШҚАНДАЙ батырма (кнопка) туралы сөз жазба!
 
-Жауапты таза HTML элементтерімен (<b>, <blockquote>) жасап, бірден ағынмен жазуды баста:`;
+Жауапты таза HTML элементтерімен (<b>, <aside>) жасап, бірден ағынмен жазуды баста:`;
 
     const contents: any[] = [
       ...history,
@@ -694,15 +696,17 @@ ${contextText}
       if (quranCitations.length > 0 || siteCitations.length > 0 || bookCitations.length > 0) {
         const lines: string[] = [];
         if (quranCitations.length > 0) {
-          lines.push(`Құран: ${quranCitations.join(', ')}`);
+          lines.push(`<h6>Құран: ${quranCitations.join(', ')}</h6>`);
         }
         if (siteCitations.length > 0) {
-          lines.push(`Сайттар: ${siteCitations.join(', ')}`);
+          lines.push(`<h6>Сайттар: ${siteCitations.join(', ')}</h6>`);
         }
         if (bookCitations.length > 0) {
-          lines.push(`Кітаптар: ${bookCitations.join(', ')}`);
+          lines.push(`<h6>Кітаптар: ${bookCitations.join(', ')}</h6>`);
         }
-        const citations = `\n\n<details><summary>Дереккөздер</summary>\n<blockquote>${lines.join('\n')}</blockquote>\n</details>\n`;
+        
+        // RichBlockDetails аккордеоны ретінде шығарамыз
+        const citations = `\n\n<details>\n<summary><b>Дереккөздерді көру</b></summary>\n${lines.join('\n')}\n</details>\n`;
         answerText += citations;
         // Trigger onChunk one last time to push the citations
         onChunk(answerText);

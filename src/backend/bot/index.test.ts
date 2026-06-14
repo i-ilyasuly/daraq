@@ -1,4 +1,5 @@
-import { setupBot, processAndDeduplicateSources, buildKeyboard, getSourceInfo, setSourceInfo, getGroupInfo, setGroupInfo, renamedTopicsCache } from './index';
+import { setupBot, getSourceInfo, setSourceInfo, getGroupInfo, setGroupInfo, renamedTopicsCache } from './index';
+import { processAndDeduplicateSources, buildKeyboard } from './messageBuilder';
 import { formatTelegramMessage, transliterateToLatin, isAskingForProof } from './formatters';
 
 jest.mock('telegraf', () => {
@@ -121,34 +122,34 @@ describe('Bot Setup & Helpers', () => {
       expect(result).toBe(originalText);
     });
 
-    it('converts markdown lines starting with > into HTML blockquotes', () => {
+    it('converts markdown lines starting with > into HTML asides', () => {
       const text = '> Бұл қысқа дәйексөз';
       const result = formatTelegramMessage(text);
-      expect(result).toBe('<blockquote>\nБұл қысқа дәйексөз\n</blockquote>');
+      expect(result).toBe('<aside>\nБұл қысқа дәйексөз\n</aside>');
     });
 
-    it('converts multiple separate blockquotes with normal text in between', () => {
+    it('converts multiple separate asides with normal text in between', () => {
       const text = '> Бірінші дәйексөз\nҚалыпты мәтін осында.\n> Екінші дәйексөз';
       const result = formatTelegramMessage(text);
-      expect(result).toBe('<blockquote>\nБірінші дәйексөз\n</blockquote>\nҚалыпты мәтін осында.\n<blockquote>\nЕкінші дәйексөз\n</blockquote>');
+      expect(result).toBe('<aside>\nБірінші дәйексөз\n</aside>\nҚалыпты мәтін осында.\n<aside>\nЕкінші дәйексөз\n</aside>');
     });
 
-    it('converts blockquotes with mixed content inside', () => {
+    it('converts asides with mixed content inside', () => {
       const text = '> **Алла Елшісі** айтты:\n> *«Амалдар ниетке байланысты»*';
       const result = formatTelegramMessage(text);
-      expect(result).toBe('<blockquote>\n<b>Алла Елшісі</b> айтты:\n<i>«Амалдар ниетке байланысты»</i>\n</blockquote>');
+      expect(result).toBe('<aside>\n<b>Алла Елшісі</b> айтты:\n<i>«Амалдар ниетке байланысты»</i>\n</aside>');
     });
 
-    it('converts long markdown blockquotes (more than 3 lines) to expandable HTML blockquotes', () => {
+    it('converts long markdown blockquotes to aside', () => {
       const text = '> Бірінші жол\n> Екінші жол\n> Үшінші жол\n> Төртінші жол';
       const result = formatTelegramMessage(text);
-      expect(result).toBe('<blockquote expandable>\nБірінші жол\nЕкінші жол\nҮшінші жол\nТөртінші жол\n</blockquote>');
+      expect(result).toBe('<aside>\nБірінші жол\nЕкінші жол\nҮшінші жол\nТөртінші жол\n</aside>');
     });
 
-    it('converts long markdown blockquotes (more than 200 physical characters) to expandable HTML blockquotes', () => {
+    it('converts long markdown blockquotes (longer than 200 chars) to aside', () => {
       const longQuote = '> ' + 'A'.repeat(210);
       const result = formatTelegramMessage(longQuote);
-      expect(result).toBe(`<blockquote expandable>\n${'A'.repeat(210)}\n</blockquote>`);
+      expect(result).toBe(`<aside>\n${'A'.repeat(210)}\n</aside>`);
     });
   });
 

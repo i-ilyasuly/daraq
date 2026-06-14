@@ -518,6 +518,6 @@ export async function generateContentStreamFixed(args: any) {
 
 // Configurable model definitions from environment variables
 export const GEMINI_EMBEDDING_MODEL = process.env.GEMINI_EMBEDDING_MODEL || 'gemini-embedding-2';
-export const GEMINI_GENERATION_MODEL = process.env.GEMINI_GENERATION_MODEL || 'gemini-flash-lite-latest';
+export const GEMINI_GENERATION_MODEL = process.env.GEMINI_INTENT_MODEL || 'gemini-flash-lite-latest';
 export const GEMINI_INTENT_MODEL = process.env.GEMINI_INTENT_MODEL || 'gemini-flash-lite-latest';
 

@@ -11,6 +11,47 @@ import { db } from '../db/firestore';
 import { getVoiceResponse } from '../rag/voiceAgent';
 import { transcribeKazakhVoice } from '../rag/scribeService';
 
+function createThrottledUpdater(callback: (text: string) => Promise<void> | void, waitMs: number) {
+  let lastRan = 0;
+  let timeout: NodeJS.Timeout | null = null;
+  let lastText = '';
+
+  const execute = async () => {
+    lastRan = Date.now();
+    timeout = null;
+    try {
+      await callback(lastText);
+    } catch (e) {}
+  };
+
+  return {
+    update: (text: string) => {
+      lastText = text;
+      const now = Date.now();
+      const remaining = waitMs - (now - lastRan);
+
+      if (remaining <= 0) {
+        if (timeout) {
+          clearTimeout(timeout);
+          timeout = null;
+        }
+        execute();
+      } else if (!timeout) {
+        timeout = setTimeout(execute, remaining);
+      }
+    },
+    flush: async () => {
+      if (timeout) {
+        clearTimeout(timeout);
+        timeout = null;
+      }
+      try {
+        await callback(lastText);
+      } catch (e) {}
+    }
+  };
+}
+
 const storage = customStorage || new Storage();
 // Fallback for dev: if you don't set it, it'll try this name
 const PROCESSED_BUCKET = process.env.PROCESSED_IMAGES_BUCKET || 'daraq-497018-daraq-processed-images';
@@ -200,7 +241,7 @@ export function setupBot() {
 
     if (!query) return;
 
-    const quotePrefix = (isVoice && customQuery) ? `<blockquote><i>"${customQuery}"</i></blockquote>\n\n` : '';
+    const quotePrefix = (isVoice && customQuery) ? `<aside><i>"${customQuery}"</i></aside>\n\n` : '';
 
     const topicCacheKey = `${chatId}_${targetThreadId || 'general'}`;
     const draftId = ctx.message ? ctx.message.message_id : Math.floor(Math.random() * 100000); // Using user message_id or custom fake ID
@@ -232,7 +273,7 @@ export function setupBot() {
           chat_id: chatId,
           draft_id: draftId,
           message_thread_id: targetThreadId,
-          rich_message: { html: `<tg-thinking>Ойлану...</tg-thinking>` }
+          rich_message: { html: `<tg-thinking>${formatStatusMessage('Ойлану')}</tg-thinking>` }
         });
       } catch (e) {
         // Ignore API failures for draft
@@ -248,20 +289,24 @@ export function setupBot() {
 
       const lang = ctx.from?.language_code;
 
+      const draftUpdater = createThrottledUpdater(async (currentFullText) => {
+        if (abortController.signal.aborted) return;
+        const formatted = quotePrefix + formatTelegramMessage(currentFullText);
+        try {
+          await sendRawTelegramApi('sendRichMessageDraft', {
+            chat_id: chatId,
+            draft_id: draftId,
+            message_thread_id: targetThreadId,
+            rich_message: { html: formatted }
+          });
+        } catch(e) {}
+      }, 1200);
+
       const answerData = await generateAgentAnswerStream(
         chatId,
         query,
-        async (currentFullText) => {
-          if (abortController.signal.aborted) return;
-          const formatted = quotePrefix + formatTelegramMessage(currentFullText);
-          try {
-            await sendRawTelegramApi('sendRichMessageDraft', {
-              chat_id: chatId,
-              draft_id: draftId,
-              message_thread_id: targetThreadId,
-              rich_message: { html: formatted }
-            });
-          } catch(e) {}
+        (currentFullText) => {
+          draftUpdater.update(currentFullText);
         },
         async (statusText) => {
           if (abortController.signal.aborted) return;
@@ -284,6 +329,8 @@ export function setupBot() {
         abortController.signal,
         true // skip internal history saving, we do it here!
       );
+
+      await draftUpdater.flush();
 
       isAgentThinking = false;
       clearInterval(typingInterval);
@@ -429,7 +476,7 @@ export function setupBot() {
 Жауап: "${answerData?.answer || ''}"`;
             
             const aiPromise = ai.models.generateContent({
-              model: 'gemini-3.1-flash-lite',
+              model: 'gemini-flash-lite-latest',
               contents: prompt
             });
             
@@ -441,10 +488,10 @@ export function setupBot() {
               let parsedName = res.text?.trim().replace(/\n/g, ' ');
               return parsedName ? parsedName.substring(0, 128) : undefined;
             }).catch(async (err) => {
-              console.warn('[AI] gemini-3.1-flash-lite қатесі немесе күту уақыты аяқталды (Timeout), балама модельге ауысамыз:', err.message || err);
+              console.warn('[AI] gemini-flash-lite-latest қатесі немесе күту уақыты аяқталды (Timeout), балама модельге ауысамыз:', err.message || err);
               try {
                 const fallbackRes = await ai.models.generateContent({
-                  model: 'gemini-3.1-flash-lite',
+                  model: 'gemini-flash-lite-latest',
                   contents: prompt
                 });
                 let fallbackName = fallbackRes.text?.trim().replace(/\n/g, ' ');
@@ -703,20 +750,24 @@ export function setupBot() {
       const lang = ctx.from?.language_code;
       const threadStr = (targetThreadId !== undefined && targetThreadId !== null) ? String(targetThreadId) : 'general';
 
+      const draftUpdater = createThrottledUpdater(async (currentFullText) => {
+        if (abortController.signal.aborted) return;
+        const formatted = formatTelegramMessage(currentFullText);
+        try {
+          if (formatted.length > 4000) return;
+          if (currentBotMsgId) {
+             await sendRawTelegramApi('editMessageText', { chat_id: chatId, message_id: currentBotMsgId, rich_message: { html: formatted }, disable_web_page_preview: true, link_preview_options: { is_disabled: true } });
+          } else {
+             await sendRawTelegramApi('sendRichMessageDraft', { chat_id: chatId, draft_id: draftId, message_thread_id: targetThreadId, rich_message: { html: formatted } });
+          }
+        } catch(e) {}
+      }, 1200);
+
       const answerData = await generateAgentAnswerStream(
         chatId,
         query,
-        async (currentFullText) => {
-          if (abortController.signal.aborted) return;
-          const formatted = formatTelegramMessage(currentFullText);
-          try {
-            if (formatted.length > 4000) return;
-            if (currentBotMsgId) {
-               await sendRawTelegramApi('editMessageText', { chat_id: chatId, message_id: currentBotMsgId, rich_message: { html: formatted }, disable_web_page_preview: true, link_preview_options: { is_disabled: true } });
-            } else {
-               await sendRawTelegramApi('sendRichMessageDraft', { chat_id: chatId, draft_id: draftId, message_thread_id: targetThreadId, rich_message: { html: formatted } });
-            }
-          } catch(e) {}
+        (currentFullText) => {
+          draftUpdater.update(currentFullText);
         },
         async (statusText) => {
           if (abortController.signal.aborted) return;
@@ -728,13 +779,13 @@ export function setupBot() {
           try {
             const txt = formatStatusMessage(statusText);
             if (currentBotMsgId) {
-               await ctx.telegram.editMessageText(chatId, currentBotMsgId, undefined, txt, { parse_mode: 'HTML', disable_web_page_preview: true, link_preview_options: { is_disabled: true } });
+               await ctx.telegram.editMessageText(chatId, currentBotMsgId, undefined, `<tg-thinking>${txt}</tg-thinking>`, { parse_mode: 'HTML', disable_web_page_preview: true, link_preview_options: { is_disabled: true } });
             } else {
                await sendRawTelegramApi('sendRichMessageDraft', {
                  chat_id: chatId,
                  draft_id: draftId,
                  message_thread_id: targetThreadId,
-                 rich_message: { html: txt }
+                 rich_message: { html: `<tg-thinking>${txt}</tg-thinking>` }
                });
             }
           } catch (e) {}
@@ -744,6 +795,8 @@ export function setupBot() {
         abortController.signal,
         true
       );
+
+      await draftUpdater.flush();
 
       isAgentThinking = false;
       clearInterval(typingInterval);

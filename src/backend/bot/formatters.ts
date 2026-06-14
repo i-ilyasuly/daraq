@@ -21,10 +21,18 @@ export const KAZ_SURAHS: { [key: string]: number } = {
 export function formatTelegramMessage(text: string, quranSources: any[] = []): string {
   let formatted = text;
 
+  // Preserve <details>...</details> blocks untouched so that they are processed as is_open: false, RichBlockDetails blocks
+  const detailsBlocks: string[] = [];
+  const rawDetailsRegex = /<details(?:[\s\S]*?)>([\s\S]*?)<\/details>/gi;
+  formatted = formatted.replace(rawDetailsRegex, (match) => {
+    detailsBlocks.push(match);
+    return `__DETAILS_PLACEHOLDER_${detailsBlocks.length - 1}__`;
+  });
+
   // :::collapse title="..."\n...\n::: маркерлерін өңдеу (Telegram HTML-дегі жиналатын блокқа айналдыру)
   const collapseRegex = /:::collapse\s+title="([^"]+)"\s*(?:\r?\n)?([\s\S]*?):::/g;
   formatted = formatted.replace(collapseRegex, (match, title, content) => {
-    return `<blockquote expandable><b>${title}</b>\n${content.trim()}</blockquote>`;
+    return `<aside><b>${title}</b>\n${content.trim()}</aside>`;
   });
 
   formatted = formatted.replace(/<br\s*\/?>/gi, '\n');
@@ -43,10 +51,8 @@ export function formatTelegramMessage(text: string, quranSources: any[] = []): s
         .join('\n')
         .trim();
       if (lines) {
-        // Егер өте ұзын болса, expandable қыламыз
-        const isLong = lines.length > 200 || lines.split('\n').length > 3;
-        const tag = isLong ? '<blockquote expandable>' : '<blockquote>';
-        formatted = formatted.replace(block, `${tag}\n${lines}\n</blockquote>\n`);
+        const tag = '<aside>';
+        formatted = formatted.replace(block, `${tag}\n${lines}\n</aside>\n`);
       }
     }
   }
@@ -63,8 +69,8 @@ export function formatTelegramMessage(text: string, quranSources: any[] = []): s
   formatted = formatted.replace(/(<\/h[1-6]>)/gi, '$1\n\n');
 
   // Blockquote тегтерінің айналасына бос абзацтар қосу
-  formatted = formatted.replace(/(<blockquote(?:[^>]*)>)/gi, '\n\n$1\n');
-  formatted = formatted.replace(/(<\/blockquote>)/gi, '\n$1\n\n');
+  formatted = formatted.replace(/(<blockquote(?:[^>]*)>|<aside(?:[^>]*)>)/gi, '\n\n$1\n');
+  formatted = formatted.replace(/(<\/blockquote>|<\/aside>)/gi, '\n$1\n\n');
 
   // Дәйексөздің сілтемесін (Құран, мысалы: "Бақара сүресі...") бөлектеу
   // Қазақша жақшамен немесе жай басталған дереккөзді блоктың ішінде не сыртында болса да бос жолмен ашу
@@ -122,6 +128,11 @@ export function formatTelegramMessage(text: string, quranSources: any[] = []): s
     }
     return match;
   });
+
+  // Restore preserved <details>...</details> blocks untouched
+  for (let i = 0; i < detailsBlocks.length; i++) {
+    formatted = formatted.replace(`__DETAILS_PLACEHOLDER_${i}__`, detailsBlocks[i]);
+  }
 
   return formatted.trim();
 }

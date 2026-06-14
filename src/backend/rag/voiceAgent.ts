@@ -25,7 +25,7 @@ async function generateVoiceScript(text: string): Promise<{ transcript: string }
   const prompt = `Сіз аудиожазба (TTS) үшін режиссерсіз. Мына мәтінді дыбыстауға арналған табиғи транскрипт етіп қайта жазып беріңіз.
 
 Талаптар:
-1. Барлық Telegram HTML тегтерін (<b>, <i>, <blockquote>) толық алып тастаңыз.
+1. Барлық Telegram HTML тегтерін (<b>, <i>, <aside>) толық алып тастаңыз.
 2. Дыбыстың эмоциясын беру үшін интонациялық белгілер қосыңыз (мысалы, [warmly] - жылы, [serious] - байыппен, [reverent] ауыр/құрметпен, [slowly] - баяу, [sighs] - күрсініп).
 3. Дайын мәтіннің басында тұрақты түрде мынадай форматты (Сцена мен Контекстті) міндетті түрде сақтап жазыңыз:
 
@@ -41,7 +41,7 @@ Speaker 1 - Aoede
 ${text}`;
 
   const interaction = await ai.interactions.create({
-    model: "gemini-3.5-flash",
+    model: "gemini-flash-lite-latest",
     input: prompt,
     generation_config: {
       temperature: 0.7,

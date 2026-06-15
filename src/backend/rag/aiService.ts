@@ -44,13 +44,21 @@ async function getChatHistory(chatId: string, threadId?: string | number) {
       .limit(20)
       .get();
     
-    if (snapshot.empty) return [];
+    if (snapshot.empty) {
+      console.log(`[getChatHistory] Loaded 0 messages for chatId: ${chatId}, threadId: ${threadStr}`);
+      return [];
+    }
 
     const messages = snapshot.docs.map(doc => doc.data());
     const formattedHistory = messages.reverse().map(msg => ({
       role: msg.role === 'bot' ? 'model' : 'user',
       parts: [{ text: msg.text }]
     }));
+
+    console.log(`[getChatHistory] Loaded ${formattedHistory.length} messages for chatId: ${chatId}, threadId: ${threadStr}`);
+    formattedHistory.forEach((m, idx) => {
+      console.log(`  [History msg ${idx}] Role: ${m.role}, Prefixed Text: "${m.parts[0].text.substring(0, 60)}..."`);
+    });
 
     return formattedHistory;
   } catch (error) {
@@ -214,45 +222,27 @@ export async function generateAgentAnswerStream(
             const threadStr = (threadId !== undefined && threadId !== null) ? String(threadId) : 'general';
             const cachedDoc = await db.collection('users').doc(chatId).collection('topics').doc(threadStr).collection('latestSources').doc('current').get();
             if (cachedDoc.exists) {
-                const cachedData = cachedDoc.data();
-                if (cachedData && cachedData.sources && cachedData.sources.length > 0) {
-                    console.log(`[aiService] Restored ${cachedData.sources.length} cached sources for proof inquiry.`);
-                    return cachedData.sources as SearchResult[];
-                }
+                return cachedDoc.data()?.sources as SearchResult[] || [];
             }
         } catch (e) {
-            console.error('[⚠️] Error fetching cached latest sources inside aiService:', e);
+            console.error("[⚠️ Error loading proof sources]:", e);
         }
-        return [] as SearchResult[];
-    })() : Promise.resolve([] as SearchResult[]);
+        return [];
+    })() : Promise.resolve([]);
 
-    // Күту
-    const [rawHistory, { hit, vector }, cachedSources] = await Promise.all([
+    const [history, cacheResult, cachedSources] = await Promise.all([
         historyPromise,
         cachePromise,
         proofSourcesPromise
     ]);
 
-    // Тарихты форматтау
-    if (rawHistory.length > 0) {
-        const lastMsg = rawHistory[rawHistory.length - 1];
-        if (lastMsg.role === 'user' && lastMsg.parts[0].text === query) {
-             rawHistory.pop();
-        }
-    }
+    const { hit, vector } = cacheResult;
+    const hasHistory = history.length > 0;
+    let queryWithContext = query;
 
-    const history: {role: string, parts: any[]}[] = [];
-    for (const msg of rawHistory) {
-        if (history.length === 0) {
-            history.push(msg);
-        } else {
-            const lastMsg = history[history.length - 1];
-            if (lastMsg.role === msg.role) {
-                lastMsg.parts[0].text += `\n\n${msg.parts[0].text}`;
-            } else {
-                history.push(msg);
-            }
-        }
+    if (hasHistory && history[history.length - 1].role === 'user') {
+        const lastUser = history[history.length - 1];
+        queryWithContext = `[Алдыңғы хабарлама]: ${lastUser.parts[0].text}\n\n[Жаңа сұрақ]: ${query}`;
     }
 
     // Егер кэштен табылса (Hit)
@@ -263,14 +253,40 @@ export async function generateAgentAnswerStream(
         const dayOfWeekC = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Almaty" })).getDay();
         const fastCachePrompt = `Сен — Daraq, Ханафи мазһабының виртуалды ұстазысың. Пайдаланушы қойған сұраққа бұрын жауап берілген. Төмендегі дайын жауаптың мағынасын сақтай отырып, оны пайдаланушы үшін жаңадан, жылы әрі табиғи етіп қайта құрастырып бер.
 Ережелер:
-1. HTML ТЕГТЕРІН ҚОЛДАН: <b> (жуан мәтін), <i> (көлбеу мәтін), <aside> (дәйексөздер). Ескі жауаптағы Құран аяттарының аудармаларын, Хадистерді немесе ғалымдардың/кітаптардың тікелей үзінділерін («кітапта жазылған үзінділер») тауып, оларды міндетті түрде <aside>...</aside> тегтерінің ішіне ал! Ескі жауапта бұрыннан бар <aside>...</aside> немесе <blockquote>...</blockquote> дәйексөз форматтауларын мүлтіксіз сақтап, қайта құрастырғанда да <aside>...</aside> дәйексөз ретінде қалдыр.
-2. Маркдаун белгілерін (мысалы, *, **) МҮЛДЕМ ҚОЛДАНБА. Тізімдер үшін қарапайым минус (-) сызықшасын немесе • (нүкте) таңбасын қолдан.
-3. Мәтін тым тығыз болмауы үшін абзацтар арасына кішігірім бос орын (жаңа жол) қалдыр.
-4. "Бұл туралы толық мәліметті... төмендегі батырманы басып..." деген сияқты БАТЫРМАҒА сілтейтін сөздерді АЛЫП ТАСТА, өйткені батырманы жүйе өзі қосады. Жай ғана жауапвтың өзін әдемілеп бер.
-5. КӨПТІЛДІ ДІНИ ӘДЕП (Multilingual Islamic Adab): ЕШҚАШАН (с.а.с), (r.а), (а.с), pbuh, ﷺ сияқты қысқартуларды/символдарды қолданбау. Толыққанды мадақ-дұғаларды ЖАҚШАҒА АЛЫП (мысалы: "<i>(Алланың оған игілігі мен сәлемі болсын)</i>" немесе "<i>(мир ему и благословение Аллаха)</i>") тілге бейімдеп, міндетті түрде <i>(...)</i> (көлбеу және жақша ішінде) тегінің ішіне толық жаз.
-${effectiveLang === 'ru' ? '6. ⚠️ ПЕРЕВОД: Обязательно переведи и дай ответ на РУССКОМ языке.' : ''}
-${effectiveLang === 'en' ? '6. ⚠️ TRANSLATION: Must translate and reply in ENGLISH.' : ''}
-${dayOfWeekC === 5 ? '7. ⚠️ БҮГІН ЖҰМА: Бұл қасиетті Жұма күні. Жауабыңа «Жұма мүбәрак болсын! 🎊» мағынасындағы құттықтауды қос.' : ''}
+1. HTML ТЕГТЕРІН ҚОЛДАН: <b> (жуан мәтін), <i> (көлбеу мәті�        return {
+            answer: fastAnswerText,
+            sources: hit.sources,
+            intent: 'KNOWLEDGE_SEARCH'
+        };
+    }
+
+    // Intent пен толықтықты анықтау (Smart Router)
+    let routerResult: RouterResult;санаты анықталды: ${intent}, толықтығы (is_complete): ${routerResult.is_complete}`);
+
+    let searchInput = routerResult.refined_query || query;
+    let currentPrompt = searchInput;
+
+    if (history.length > 0 && history[history.length - 1].role === 'user') {
+        const lastUser = history.pop();
+        if (lastUser) {
+            currentPrompt = `[Алдыңғы хабарлама]: ${lastUser.parts[0].text}\n\n[Жаңа сұрақ]: ${currentPrompt}`;
+        }
+    }
+
+    if (effectiveLang === 'ru') {
+        currentPrompt = `[⚠️ ПЕРЕВОД: Отвечай only на РУССКОМ языке]\n` + currentPrompt;
+    } else if (effectiveLang === 'en') {
+        currentPrompt = `[⚠️ TRANSLATION: Reply strictly in ENGLISH]\n` + currentPrompt;
+    }
+    
+    const dayOfWeekCC = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Almaty" })).getDay();
+    if (dayOfWeekCC === 5) {
+        currentPrompt = `[⚠️ БҮГІН ЖҰМА: Бұл қасиетті Жұма күні. Жауабыңа «Жұма мүбәрак болсын! 🎊» мағынасындағы құттықтауды қос]\n` + currentPrompt;
+    }�раф ретінде жаз және астынан тағы екі бос жол таста. Оны жиналатын блокқа (<blockquote expandable>) салудың мүлдем қажеті ЖОҚ.
+   - Одан кейін бірден басқа мәтін мен <h2>Басты үкім</h2> тақырыпшасын бастап, нақты үкімін ерекшелеп бер.
+${effectiveLang === 'ru' ? '7. ⚠️ ПЕРЕВОД: Обязательно переведи и дай ответ на РУССКОМ языке.' : ''}
+${effectiveLang === 'en' ? '7. ⚠️ TRANSLATION: Must translate and reply in ENGLISH.' : ''}
+${dayOfWeekC === 5 ? '8. ⚠️ БҮГІН ЖҰМА: Бұл қасиетті Жұма күні. Жауабыңа «Жұма мүбәрак болсын! 🎊» мағынасындағы құттықтауды қос.' : ''}
 
 Ескі жауап:
 """
@@ -314,6 +330,7 @@ ${hit.answer}
         intent: 'KNOWLEDGE_SEARCH',
         is_complete: true,
         clarification_prompt: '',
+        chitchat_response: '',
         refined_query: query
       };
     } else {
@@ -350,31 +367,10 @@ ${hit.answer}
     // Chitchat flows: skip DB search completely
     if (intent === 'CHITCHAT') {
       console.log(`[🤖] Chitchat flow triggered.`);
-      const responseStream = await generateContentStreamFixed({
-        model: GEMINI_GENERATION_MODEL,
-        contents: [
-          ...history,
-          { role: 'user', parts: [{ text: currentPrompt }] }
-        ],
-        config: {
-          systemInstruction: SYSTEM_PROMPT,
-          temperature: 0.5,
-          thinkingConfig: {
-            thinkingLevel: ThinkingLevel.MINIMAL
-          }
-        }
-      });
-
-      let answerText = "";
-      for await (const chunk of responseStream) {
-        if (abortSignal?.aborted) {
-           throw new Error("AbortError");
-        }
-        if (chunk.text) {
-          answerText += chunk.text;
-          onChunk(answerText);
-        }
-      }
+      
+      const answerText = routerResult.chitchat_response || "Уағалейкумассалам! <b>Daraq</b> көмекшісіне қош келдіңіз. Діни мәселелер бойынша сұрағыңыз болса, қоя беріңіз. 😊";
+      
+      onChunk(answerText);
 
       if (!skipHistorySave) {
         await saveToChatHistory(chatId, 'user', query, threadId);
@@ -549,12 +545,14 @@ ${contextText}
 ⚠️ МАҢЫЗДЫ ЕРЕЖЕ СЕКЦИЯСЫ:
 Пайдаланушыға осы контекстте бар мәлімет аясында Ханафи мазһабының ұстазы ретінде (Persona-ға сәйкес) жауап бер.
 Егер жауапта Құраннан аяттар немесе дәлелдер келтірілетін болса (мейлі олар басқа кітаптардан немесе сайт мәтіндерінен табылса да), сен оларды міндетті түрде нақты Құран аяттарының дерегінен (Құран құралдары айқындап берген АРАБША және АУДАРМАСЫ бөлімдерінен) сәйкестендіріп тауып ал. Ешқашан аятты тек қазақша аударма күйінде жаза салма! Әрқашан алдымен арабшасын жазып, одан кейін ғана аудармасын және соңына тиісті форматтағы сілтемесін қос.
-Қосылатын аяттарды міндетті түрде бір <aside>...</aside> тегінің ішінде ерекшелеп, СТРИКТТІ түрде мына формат бойынша жаз (арабша мәтін мен аударманың арасында бос жол болсын, аудармадан кейін де бос жол тасталып, дәйексөз сілтемесі жаңа азат жолға астына жеке жазылсын):
-<aside>[АРАБША МӘТІН харакаттарымен]
+Қосылатын аяттарды міндетті түрде бір тұтас <aside>...</aside> блогының ішінде, арабшасы мен қазақша аудармасының арасына нақты бос жолдар (абзацтар) тастау арқылы жаз. Telegram-да қателік тудыратын ішкі немесе қабатталған (nested) <aside> тегтерін қолданба! СТРИКТТІ түрде мына формат бойынша жаз (арабша мәтіні, қазақша аудармасы және сілтемесі бір ғана <aside> тегінің ішінде болады, бірақ олардың арасында міндетті түрде екі бос жол (\n\n) тасталып, ал сілтемесі <cite>...</cite> тегімен ерекшеленеді):
+<aside>
+[АРАБША МӘТІН харакаттарымен]
 
 «[АУДАРМАСЫН жақшаға алмай, тырнақшаның ішінде осылай жаз]»
 
-([СҮРЕ АТЫ] сүресі, [АЯТ НӨМІРІ]-аят (<a href="[АУДИО СІЛТЕМЕСІ]">тыңдау</a>) )</aside> (Ескерту: Пайдаланушыға көрсететін әрбір Құран аяты үшін аудио сілтемесі контекстте міндетті түрде берілген. Сондықтан кез келген аят үшін тыңдау сілтемесі бар нұсқаны 100% міндетті түрде таңдап жаз!).
+<cite>([СҮРЕ АТЫ] сүресі, [АЯТ НӨМІРІ]-аят (<a href="[АУДИО СІЛТЕМЕСІ]">тыңдау</a>) )</cite>
+</aside> (Ескерту: Пайдаланушыға көрсететін әрбір Құран аяты үшін аудио сілтемесі контекстте міндетті түрде берілген. Сондықтан кез келген аят үшін тыңдау сілтемесі бар нұсқаны 100% міндетті түрде таңдап жаз!).
 Егер табылған дереккөздерде ҚМДБ ресми сайтынан алынған қазіргі заманғы пәтуалар болса, соларға сүйеніп толық ресми және заманауи пәтуа үкімін түсіндіріп бер. Егер классикалық кітаптар да, заманауи пәтуалар да қатар табылса, екеуін біріктіріп ең жақсы жауап нұсқасын жаса.
 Егер ешқандай ақпарат табылмаса немесе контексте нақты жауап болмаса, онда нақты "Бұл мәлімет кітаптардан табылмады, сондықтан нақты жауап бере алмаймын" деп ашық айт. Жалған кітап атын немесе жауап ойлап таппа!
 ЖАУАПТЫҢ СОҢЫНДА ЕШҚАНДАЙ дереккөзді немесе кітап атын, бетін атап түсіндіретін үлкен сөйлемдер, сүйенген сайттарды немесе "Бұл мәліметтерді ҚМДБ-ның ресми... дайындадым" не "Бұл туралы толық мәліметті... бетінен тауып бердім" сияқты артық сөйлемдерді МҮЛДЕМ ЖАЗБА! Барлық дереккөздер мен қолданылған кітаптар соңында автоматты түрде дәйексөз ретінде қосылады. ЕШҚАНДАЙ батырма (кнопка) туралы сөз жазба!

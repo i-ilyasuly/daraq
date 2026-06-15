@@ -5,6 +5,7 @@ export interface RouterResult {
   intent: 'CHITCHAT' | 'KNOWLEDGE_SEARCH';
   is_complete: boolean;
   clarification_prompt: string;
+  chitchat_response: string;
   refined_query: string;
 }
 
@@ -25,6 +26,7 @@ export async function classifyIntent(query: string, history: {role: string, part
       intent: 'CHITCHAT',
       is_complete: true,
       clarification_prompt: '',
+      chitchat_response: 'Уағалейкумассалам! <b>Daraq</b> көмекшісіне қош келдіңіз. Діни мәселелер бойынша сұрағыңыз болса, қоя беріңіз. 😊',
       refined_query: query
     };
   }
@@ -37,7 +39,7 @@ export async function classifyIntent(query: string, history: {role: string, part
       .map(h => `${h.role === 'model' ? 'Бот' : 'Пайдаланушы'}: "${h.parts[0].text}"`)
       .join('\n');
 
-    const promptText = `Сен — Daraq діни ассистент жүйесінің ақылды роутері және талдаушысысың. Пайдаланушының жаңа сұрағын чат тарихымен бірге талдап, тиісті санатты, сұрақтың толықтығын, қажет болса нақтылау сұрағын және қайта құрылған сұранысты белгіле.
+    const promptText = `Сен — Daraq діни ассистент жүйесінің ақылды роутері және талдаушысысың. Пайдаланушының жаңа сұрағын чат тарихымен бірге талдап, тиісті санатты, сұрақтың толықтығын, қажет болса нақтылау сұрағын, ал егер сәлемдесу болса дайын жауапты (chitchat_response) және қайта құрылған сұранысты белгіле.
 
 ЖҰМЫС ШЕҢБЕРІ мен ЕРЕЖЕЛЕРІ:
 1. 'intent':
@@ -45,30 +47,43 @@ export async function classifyIntent(query: string, history: {role: string, part
    - 'KNOWLEDGE_SEARCH': діни білім, пәтуалар, шариғат ережелері бойынша сұрақтар.
 
 2. 'is_complete' (тек KNOWLEDGE_SEARCH үшін маңызды):
-   - Пайдаланушы тым жалпылама, нақты белгісіз мәселе қойса (мысалы: "Дәрет бұзыла ма?", "Ораза бұзыла ма?", "Намазым қабыл ма?"), оны 'is_complete: false' деп бағала. Бізге нақты жағдайды (мұрын қанау, ұйықтау, тіс жуу т.б.) білу шарт.
-   - Егер пайдаланушы бұған дейінгі боттың нақтылауына жауап берсе (мысалы, бұрын "Ораза бұзыла ма?" деген, бот нақтылау сұраған, енді ол "Тіс жудым/дәрі іштім" немесе "Еріксіз тамақ жұтып қойдым" дейді), бұл сұрақ толықтырылды деп санап, 'is_complete: true' деп бер.
-   - Егер сұрақтың өзінде бірден нақты оқиға/іс-әрекет сипатталса (мысалы: "Жыласа дәрет бұзыла ма?", "Көз жасы дәретке әсер ете ме?"), бұл толық сұрақ. 'is_complete: true' деп бер.
+   - Пайдаланушының сұрағы өте қысқа, мағынасыз немесе мүлдем түсініксіз болған жағдайда ғана (мысалы: "бірдеңе", "қалай", "жіберу") 'is_complete: false' деп бағала.
+   - Егер сұрақ жалпылама болса да, мағынасы айқын әрі түсінікті болса (мысалы: "Оразаны не бұзады?", "Дәрет қалай алынады?", "Қандай жағдайларда намаз оқылмайды?"), оны МІНДЕТТІ ТҮРДЕ 'is_complete: true' деп бағала. Ақылға салып қарағанда түсінікті сұрақтарға орынсыз нақтылау сұрай берудің ҚАЖЕТІ ЖОҚ! Жалпы сұрақтарға біз базадан жалпылама жауап тауып бере аламыз.
+   - Егер пайдаланушы бұған дейінгі боттың нақтылауына жауап берсе, бұл сұрақ толықтырылды деп санап, 'is_complete: true' деп бер.
+   - Егер сұрақтың өзінде бірден нақты оқиға/іс-әрекет сипатталса, бұл толық сұрақ. 'is_complete: true' деп бер.
    - ТЕК CHITCHAT немесе Құран аяттарына тікелей сілтейтін сұрақтар үшін 'is_complete: true' болсын.
 
-3. 'clarification_prompt':
-   - Егер 'is_complete: false' болса, пайдаланушы сұраған тілде (Қазақша, Орысша немесе Ағылшынша) сыпайы, жұмсақ түрде дәлелдемелі бапты анықтау сұрағын жаз. Сұрақта оған балама мысалдарды көрсетіп бағытта (мысалы: "Дәретіңізді дәл қандай жағдай бұзды деп ойлайсыз? Жел шығуы, мұрын қанауы немесе ұйықтау сияқты нақты не болғанын сипаттап берсеңіз, сізге дұрыс пәтуа тауып беремін. 😊").
-   - 'is_complete: true' болса, бұл өріс бос ("") болсын.
+3. 'clarification_prompt' және 'chitchat_response':
+   - ВИЗУАЛДЫ ӘДЕМІЛІК (АСА МАҢЫЗДЫ): 'clarification_prompt' немесе 'chitchat_response' өрісіне мәтін жазғанда міндетті түрде Telegram HTML тегтерін қолданып (<b>қалың қаріп</b>, <i>курсив</i>, <ul><li>тізімдер</li></ul>) жаз! Сіздің сұрағыңыз не жауабыңыз жалаң мәтін болмауы керек. Маңызды сөздерді қалың етіп белгілеп, эмодзилер (🌸, 😊, т.б.) қос.
+   - Егер 'is_complete: false' болса, 'clarification_prompt' өрісіне нақтылау сұрағын жаз, ал 'chitchat_response' бос қалсын.
+   - Егер intent 'CHITCHAT' болса, 'chitchat_response' өрісіне пайдаланушыға арналған өзіңнің жылы, сыпайы жауабыңды HTML форматпен жаз (мысалы: "Уағалейкумассалам! <b>Daraq</b> көмекшісіне қош келдіңіз. 😊"), ал 'clarification_prompt' бос қалсын.
 
 4. 'refined_query':
    - Егер 'is_complete: true' болса, чат тарихындағы бастапқы жалпы сұрақты және пайдаланушының жаңа жауаптарын біріктіріп, ең нақты, қысқа діни іздеу сұранысын (refined query) жаса.
-   - Мысалы: Пайдаланушы "Ораза бұзыла ма?" деп бастап, кейін "Тіс жусам" десе, refined_query: "Тіс жуғанда ораза бұзыла ма" деп құрастырылсын.
    - Сұрақ тілі сұрақ қойылған тілмен (Қазақша/Орысша/Ағылшынша) дәл СӘЙКЕС БОЛСЫН.
 
 ===
 ЖҰМЫС ҮЛГІЛЕРІ (Few-Shot Examples):
 
-Сұрақ: "Дәрет бұзыла ма?"
+Сұрақ: "Дәрет қалай алынады?"
+Чат тарихы: (бос)
+Нәтиже:
+{
+  "intent": "KNOWLEDGE_SEARCH",
+  "is_complete": true,
+  "clarification_prompt": "",
+  "chitchat_response": "",
+  "refined_query": "Дәретті қалай алады, дәрет алу үлгісі"
+}
+
+Сұрақ: "қандай"
 Чат тарихы: (бос)
 Нәтиже:
 {
   "intent": "KNOWLEDGE_SEARCH",
   "is_complete": false,
-  "clarification_prompt": "Дәретіңізді дәл қандай жағдай бұзды деп ойлайсыз? Қан ағуы, жел шығуы немесе ұйықтап қалу өкілі сияқты нақты бір оқиға болды ма? Сипаттап жазсаңыз, нақты жауап табамын. 😊",
+  "clarification_prompt": "Кешіріңіз, сұрағыңыз түсініксіз болды. <b>Нақтырақ</b> сипаттап жаза аласыз ба? 😊",
+  "chitchat_response": "",
   "refined_query": ""
 }
 
@@ -81,6 +96,7 @@ export async function classifyIntent(query: string, history: {role: string, part
   "intent": "KNOWLEDGE_SEARCH",
   "is_complete": true,
   "clarification_prompt": "",
+  "chitchat_response": "",
   "refined_query": "мұрыннан қан аққанда дәрет бұзыла ма"
 }
 
@@ -90,20 +106,20 @@ export async function classifyIntent(query: string, history: {role: string, part
 {
   "intent": "KNOWLEDGE_SEARCH",
   "is_complete": false,
-  "clarification_prompt": "Опишите, пожалуйста, какая именно ситуация произошла? Например, выделилась ли кровь, был ли сон или произошло что-то другое? Это поможет мне найти точный ответ по мазхабу Ханафи. 😊",
+  "clarification_prompt": "Опишите, пожалуйста, какая именно ситуация произошла? Например, выделилась ли <b>кровь</b>, был ли <b>сон</b> или произошло что-то другое? <i>Это поможет мне найти точный ответ по мазхабу Ханафи.</i> 😊",
+  "chitchat_response": "",
   "refined_query": ""
 }
 
-Сұрақ: "текла кровь"
-Чат тарихы:
-Пайдаланушы: "Нарушается ли омовение?"
-Бот: "Опишите, пожалуйста, какая именно ситуация произошла?"
+Сұрақ: "Рахмет көп көп!"
+Чат тарихы: (бос)
 Нәтиже:
 {
-  "intent": "KNOWLEDGE_SEARCH",
+  "intent": "CHITCHAT",
   "is_complete": true,
   "clarification_prompt": "",
-  "refined_query": "Нарушается ли омовение при выделении крови"
+  "chitchat_response": "Оқасы жоқ! Алла разы болсын! 🌸 Егер басқа да сұрақтарыңыз болса, қоя беріңіз.",
+  "refined_query": "Рахмет көп көп!"
 }
 
 ===
@@ -129,11 +145,14 @@ ${formattedHistoryText || '(бос)'}`;
             clarification_prompt: {
               type: Type.STRING
             },
+            chitchat_response: {
+              type: Type.STRING
+            },
             refined_query: {
               type: Type.STRING
             }
           },
-          required: ["intent", "is_complete", "clarification_prompt", "refined_query"]
+          required: ["intent", "is_complete", "clarification_prompt", "chitchat_response", "refined_query"]
         }
       }
     });
@@ -147,6 +166,7 @@ ${formattedHistoryText || '(бос)'}`;
       intent: (parsedData.intent === 'CHITCHAT') ? 'CHITCHAT' : 'KNOWLEDGE_SEARCH',
       is_complete: parsedData.is_complete === true,
       clarification_prompt: parsedData.clarification_prompt || '',
+      chitchat_response: parsedData.chitchat_response || '',
       refined_query: parsedData.refined_query || query
     };
 
@@ -171,6 +191,7 @@ ${formattedHistoryText || '(бос)'}`;
       intent: isReligious ? 'KNOWLEDGE_SEARCH' : 'CHITCHAT',
       is_complete: true,
       clarification_prompt: '',
+      chitchat_response: isReligious ? '' : 'Уағалейкумассалам! <b>Daraq</b> көмекшісіне қош келдіңіз. Діни мәселелер бойынша сұрағыңыз болса, қоя беріңіз. 😊',
       refined_query: query
     };
   }

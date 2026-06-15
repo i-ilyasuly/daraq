@@ -29,14 +29,13 @@ export function formatTelegramMessage(text: string, quranSources: any[] = []): s
     return `__DETAILS_PLACEHOLDER_${detailsBlocks.length - 1}__`;
   });
 
-  // :::collapse title="..."\n...\n::: маркерлерін өңдеу (Telegram HTML-дегі жиналатын блокқа айналдыру)
+  // :::collapse title="..."\n...\n::: маркерлерін өңдеу (Telegram HTML-дегі жиналатын блокқа айналнору)
   const collapseRegex = /:::collapse\s+title="([^"]+)"\s*(?:\r?\n)?([\s\S]*?):::/g;
   formatted = formatted.replace(collapseRegex, (match, title, content) => {
     return `<aside><b>${title}</b>\n${content.trim()}</aside>`;
   });
 
-  formatted = formatted.replace(/<br\s*\/?>/gi, '\n');
-  formatted = formatted.replace(/<\/p>/gi, '\n\n').replace(/<p>/gi, '');
+  formatted = formatted.replace(/<\/p>/gi, '<br><br>').replace(/<p>/gi, '');
   
   // Тізімдердегі * белгілерін • белгісіне ауыстыру (Жаңа жолдан басталған немесе бос орын алдындағы)
   formatted = formatted.replace(/^(\s*)\*\s/gm, '$1• ');
@@ -61,23 +60,15 @@ export function formatTelegramMessage(text: string, quranSources: any[] = []): s
   formatted = formatted.replace(/(?<!<)\*(?!>)(.*?)\*(?![^<]*>)/g, '<i>$1</i>'); // *italic*
   formatted = formatted.replace(/\|\|(.*?)\|\|/gs, '<tg-spoiler>$1</tg-spoiler>'); // ||spoiler|| -> <tg-spoiler>spoiler</tg-spoiler>
 
-  // Арабша мәтіннен кейін бірден қазақша басталса, олардың арасын ашу
-  formatted = formatted.replace(/([\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\u061F\u060C\u06D4\u06DD]{2,}[^А-ЯӨҮҰҚҒІҢәғқңөұүһіA-Za-z<]{0,20}?)([А-ЯӨҮҰҚҒІҢәғқңөұүһі«])/g, '$1\n\n$2');
-
-  // HTML тақырыптарының (h1-h6) айналасына бос абзацтар қосу
-  formatted = formatted.replace(/(<h[1-6]>)/gi, '\n\n$1');
-  formatted = formatted.replace(/(<\/h[1-6]>)/gi, '$1\n\n');
+  formatted = formatted.replace(/(<h[1-6]>)/gi, '<br>$1');
+  formatted = formatted.replace(/(<\/h[1-6]>)/gi, '$1<br>');
 
   // Blockquote тегтерінің айналасына бос абзацтар қосу
-  formatted = formatted.replace(/(<blockquote(?:[^>]*)>|<aside(?:[^>]*)>)/gi, '\n\n$1\n');
-  formatted = formatted.replace(/(<\/blockquote>|<\/aside>)/gi, '\n$1\n\n');
-
-  // Дәйексөздің сілтемесін (Құран, мысалы: "Бақара сүресі...") бөлектеу
-  // Қазақша жақшамен немесе жай басталған дереккөзді блоктың ішінде не сыртында болса да бос жолмен ашу
-  formatted = formatted.replace(/(\n[ \t]*)(?:\(|«|\[)?([А-ЯӨҮҰҚҒІҢәғқңөұүһі]+\s+сүресі)/g, '$1\n$2');
+  formatted = formatted.replace(/(<blockquote(?:[^>]*)>|<aside(?:[^>]*)>)/gi, '<br>$1<br>');
+  formatted = formatted.replace(/(<\/blockquote>|<\/aside>)/gi, '<br>$1<br>');
 
   // Мағынасы мен Хикметі сөзінің жоғары жағына да бос абзац қосуды қамтамасыз ету
-  formatted = formatted.replace(/(Мағынасы мен [Хх]икметі)/g, '\n\n$1');
+  formatted = formatted.replace(/(Мағынасы мен [Хх]икметі)/g, '<br>$1');
 
   // Үлкен бос орындарды болдырмау үшін 3 немесе одан көп қатар келген бос жолдарды бір бос жолға азайтамыз (ең көп дегенде 2 жаңа жол)
   formatted = formatted.replace(/(?:\r?\n\s*){3,}/g, '\n\n');
@@ -129,10 +120,40 @@ export function formatTelegramMessage(text: string, quranSources: any[] = []): s
     return match;
   });
 
+  // Convert any remaining newline characters \n to HTML <br> tags
+  formatted = formatted.replace(/\r?\n/g, '<br>');
+
+  // Normalize consecutive <br> tags (e.g. 3 or more <br> tags to maximum <br><br> for consistent double paragraph breaks)
+  formatted = formatted.replace(/(?:<br\s*\/?>\s*){3,}/gi, '<br><br>');
+
+  // Reduce consecutive <br> before and after structural elements (like headings, blockquotes, asides) to at most a single <br>
+  // (We handle <hr/> and </aside> separately for complete removal)
+  formatted = formatted.replace(/(?:<br\s*\/?>\s*){2,}(?=<h[1-6]>|<\/h[1-6]>|<blockquote(?:[^>]*)>|<aside(?:[^>]*)>)/gi, '<br>');
+  formatted = formatted.replace(/(<\/h[1-6]>|<blockquote(?:[^>]*)>|<aside(?:[^>]*)>)\s*(?:<br\s*\/?>\s*){2,}/gi, '$1<br>');
+
+  // Clean up any stray <br> tags immediately touching table, list, or list item tags to keep layout compact and proper
+  formatted = formatted.replace(/<(table|thead|tbody|tr|th|td|ul|ol|li)([^>]*)>\s*(?:<br\s*\/?>\s*)+/gi, '<$1$2>');
+  formatted = formatted.replace(/(?:<br\s*\/?>\s*)+<\/(table|thead|tbody|tr|th|td|ul|ol|li)>/gi, '</$1>');
+
+  // 1. Strip any <br> tags before and after <hr/> completely as requested ("екі <br><br> дегеннің екеуін де өшір. Сызық үшін керек емес.")
+  formatted = formatted.replace(/(?:<br\s*\/?>\s*)*<hr\s*\/?>\s*(?:<br\s*\/?>\s*)*/gi, '<hr/>');
+
+  // 2. Reduce multiple <br> tags before <details> blocks (placeholders) to a single <br> ("екі <br><br> ді бір <br> ге ауыстыр")
+  formatted = formatted.replace(/(?:<br\s*\/?>\s*){2,}(?=__DETAILS_PLACEHOLDER_|<details\b)/gi, '<br>');
+
+  // 3. Reduce multiple <br> tags before <cite> tags inside asides to a single <br> ("басындағы екі <br><br> лі бір ғана <br> ге ауыстыр")
+  formatted = formatted.replace(/(?:<br\s*\/?>\s*){2,}(?=<cite\b)/gi, '<br>');
+
+  // 4. Remove trailing <br> tags after blockquote or aside closing tags entirely ("соңындағы екі <br><br> ді өшіріп тастай сал, соңына керек емес.")
+  formatted = formatted.replace(/(<\/blockquote>|<\/aside>)\s*(?:<br\s*\/?>\s*)+/gi, '$1');
+
   // Restore preserved <details>...</details> blocks untouched
   for (let i = 0; i < detailsBlocks.length; i++) {
     formatted = formatted.replace(`__DETAILS_PLACEHOLDER_${i}__`, detailsBlocks[i]);
   }
+
+  // 5. Ensure no trailing <br> tags remain at the very end of the message (after the closing details block/sources)
+  formatted = formatted.replace(/(?:<br\s*\/?>\s*)+$/gi, '');
 
   return formatted.trim();
 }

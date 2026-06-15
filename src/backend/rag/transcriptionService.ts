@@ -43,8 +43,11 @@ export function validateAndCleanCorrection(rawText: string, correctedText: strin
     }
   }
 
+  // Егер LLM нақтылау сұраса (Кешіріңіз, дауыстық...), оны өткізіп жібереміз
+  const isClarification = normalized.includes('кешіріңіз') && (normalized.includes('түсіне алмадым') || normalized.includes('нақтылап'));
+
   // 3. Ұзындықты бақылау: Егер шикі мәтін қысқа болса, бірақ түзетілген мәтін одан бірнеше есе ұзын болып, нұсқаулықтарды шығарып жіберсе
-  if (rawText.length < 15 && cleaned.length > 80) {
+  if (!isClarification && rawText.length < 15 && cleaned.length > 80) {
     console.warn(`[⚠️ CORRECTOR GUARD] Suspicious length expansion! Raw: ${rawText.length}, Corrected: ${cleaned.length}. Falling back to raw.`);
     return rawText;
   }

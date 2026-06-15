@@ -8,7 +8,6 @@ import { searchAnswers } from '../rag/searchService';
 import { generateAgentAnswerStream, saveToChatHistory, rewindHistory, correctTranscribedText } from '../rag/aiService';
 import { ai } from '../rag/aiClient';
 import { db } from '../db/firestore';
-import { getVoiceResponse } from '../rag/voiceAgent';
 import { transcribeKazakhVoice } from '../rag/scribeService';
 
 function createThrottledUpdater(callback: (text: string) => Promise<void> | void, waitMs: number) {
@@ -423,7 +422,8 @@ export function setupBot() {
           const pOpts = { ...extraOptions };
           delete pOpts.reply_parameters;
           // Fallback if rich message fails
-          botSentMsg = await ctx.telegram.sendMessage(chatId, txt.replace(/<[^>]*>?/gm, ''), pOpts);
+          const plainText = txt.replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]*>?/gm, '');
+          botSentMsg = await ctx.telegram.sendMessage(chatId, plainText, pOpts);
       }
 
       // Жадқа және дерекқорға сақтау
@@ -439,6 +439,9 @@ export function setupBot() {
         const tCacheKey = `${chatId}_${targetThreadId}`;
         (async () => {
           try {
+            let recentlyUsedEmojis: string[] = [];
+            let recentlyUsedEmojiIds: string[] = [];
+
             if (db) {
               // 1. Жергілікті кэште бар ма, тексереміз
               if (renamedTopicsCache.has(tCacheKey)) {
@@ -452,9 +455,29 @@ export function setupBot() {
                 renamedTopicsCache.add(tCacheKey);
                 return;
               }
+
+              // 3. Соңғы 30 тақырыптың эмодзилерін жүктейміз (қайталамау үшін)
+              try {
+                const topicsSnap = await db.collection('users').doc(chatId).collection('topics')
+                  .orderBy('updatedAt', 'desc')
+                  .limit(30)
+                  .get();
+                topicsSnap.forEach(doc => {
+                  const data = doc.data();
+                  if (data.emoji) recentlyUsedEmojis.push(data.emoji);
+                  if (data.customEmojiId) recentlyUsedEmojiIds.push(data.customEmojiId);
+                });
+              } catch (err) {
+                console.error('[AI] Бұрынғы тақырыптарды/эмодзилерді Firestore-дан жүктеу кезінде қате:', err);
+              }
             }
 
             console.log(`[Rename Check] Proceeding to generate premium Big Tech name for thread/topic ${targetThreadId}...`);
+            console.log(`[Stickers] Recently used emojis: ${JSON.stringify(recentlyUsedEmojis)}, IDs: ${JSON.stringify(recentlyUsedEmojiIds)}`);
+
+            const avoidInstruction = recentlyUsedEmojis.length > 0
+              ? `\n\n5. ҚАТАҢ ШЕКТЕУ: Қайталамау үшін мына эмодзилерді МҮЛДЕМ қолданба немесе басқасын таңда: ${Array.from(new Set(recentlyUsedEmojis)).join(', ')}`
+              : '';
 
             const prompt = `Сен — Telegram тақырыптарының атауын жасайтын кәсіби редакторсың. 
 Мына сұрақ пен жауапты талдап, олардың негізгі тақырыбын Big Tech (ChatGPT, Claude) стандарттарына 100% сай келетіндей етіп жаса.
@@ -463,7 +486,7 @@ export function setupBot() {
 1. ҰЗЫНДЫҒЫ: Атау қатаң түрде тек 2-3 сөзден ғана тұруы керек.
 2. ФОРМАТЫ: Сұраулы сөйлем немесе етістік қолданба. Тек зат есіммен немесе атау тұлғасында жаз (мысалы: "Ораза ұстау тәртібі" немесе "Сапардағы намаз").
 3. ТАЗАЛЫҚ: Ешқандай тырнақша, нүкте, үтір, сұрақ белгісін қолданба.
-4. ДИЗАЙН: Тақырып атауының ең басына тақырыпқа сәйкес келетін ТЕК 1 эмодзи қос (мысалы: 📚, 🚗, 💡, 📝). Егер тақырыпқа сай PREMIUM иконка таппасаң, жай ғана тақырыпқа сай эмодзи қой, жүйе өзі реттейді.
+4. ДИЗАЙН: Тақырып атауының ең басына тақырыпқа сәйкес келетін ТЕК 1 эмодзи қос (мысалы: 📚, 🚗, 💡, 📝). Егер тақырыпқа сай PREMIUM иконка таппасаң, жай ғана тақырыпқа сай эмодзи қой, жүйе өзі реттейді.${avoidInstruction}
 5. ТІЛ: Тек қазақ тілінде жаз.
 
 ҮЛГІ (Few-Shot Examples):
@@ -512,6 +535,7 @@ export function setupBot() {
 
               const parsed = extractEmojiAndText(newName);
               const emojiMap = await getCustomEmojiMap(ctx.telegram);
+              const availableEntries = Array.from(emojiMap.entries());
 
               if (parsed.emoji) {
                 let matchedId = emojiMap.get(parsed.emoji);
@@ -524,20 +548,55 @@ export function setupBot() {
                   }
                 }
 
-                // Егер табылса, соны қолданамыз. Табылмаса, дефолтты анимациялық смайликтің бірін таңдауға мәжбүрлейміз.
+                // Егер табылған смайлик бұрыннан соңғы 30 рет қолданылса, әрі басқа қолданылмаған анимациялық смайликтер бар болса:
+                // Оны жаңа, еш қайталанбаған біреуіне алмастырамыз.
+                if (matchedId && (recentlyUsedEmojiIds.includes(matchedId) || recentlyUsedEmojis.includes(parsed.emoji))) {
+                  const unusedAlternative = availableEntries.find(([emojiChar, id]) => {
+                    return !recentlyUsedEmojiIds.includes(id) && !recentlyUsedEmojis.includes(emojiChar);
+                  });
+                  if (unusedAlternative) {
+                    console.log(`[Stickers] Emoji ${parsed.emoji} was recently used. Overriding with unused animated emoji character: ${unusedAlternative[0]}`);
+                    matchedId = unusedAlternative[1];
+                    parsed.emoji = unusedAlternative[0];
+                  }
+                }
+
+                // Егер әлі де табылмаса, дефолтты анимациялық смайликтің бірін таңдауға мәжбүрлейміз.
                 if (!matchedId) {
-                  matchedId = emojiMap.get('📝') || emojiMap.get('❓') || emojiMap.get('🧠') || Array.from(emojiMap.values())[0];
+                  const unusedAlternative = availableEntries.find(([emojiChar, id]) => {
+                    return !recentlyUsedEmojiIds.includes(id) && !recentlyUsedEmojis.includes(emojiChar);
+                  });
+                  if (unusedAlternative) {
+                    matchedId = unusedAlternative[1];
+                    parsed.emoji = unusedAlternative[0];
+                  } else {
+                    matchedId = emojiMap.get('📝') || emojiMap.get('❓') || emojiMap.get('🧠') || Array.from(emojiMap.values())[0];
+                  }
                 }
 
                 customEmojiId = matchedId;
                 cleanName = parsed.text || "Тақырып"; // Таза мәтін, смайликсіз
                 console.log(`[Stickers] Found match for ${parsed.emoji} -> ID ${matchedId}. Using clean title: "${cleanName}"`);
               } else {
-                // Егер тақырыпта мүлдем смайлик табылмаса, бәрібір анимациялық смайликтердің бірін таңдауға мәжбүрлейміз
-                const defaultEmojiId = emojiMap.get('🧠') || emojiMap.get('📝') || emojiMap.get('❓') || Array.from(emojiMap.values())[0];
-                customEmojiId = defaultEmojiId;
+                // Егер тақырыпта мүлдем смайлик табылмаса, бәрібір соңғы қолданылмаған анимациялық смайликтердің бірін таңдауға мәжбүрлейміз
+                const unusedAlternative = availableEntries.find(([emojiChar, id]) => {
+                  return !recentlyUsedEmojiIds.includes(id) && !recentlyUsedEmojis.includes(emojiChar);
+                });
+                
+                let fallbackId = '';
+                let fallbackChar = '';
+                if (unusedAlternative) {
+                  fallbackId = unusedAlternative[1];
+                  fallbackChar = unusedAlternative[0];
+                } else {
+                  fallbackId = emojiMap.get('🧠') || emojiMap.get('📝') || emojiMap.get('❓') || Array.from(emojiMap.values())[0];
+                  fallbackChar = '🧠';
+                }
+                
+                customEmojiId = fallbackId;
+                parsed.emoji = fallbackChar;
                 cleanName = newName; // Смайликсіз таза атау
-                console.log(`[Stickers] No emoji in raw title. Forcing custom emoji ID: ${defaultEmojiId}. Title: "${cleanName}"`);
+                console.log(`[Stickers] No emoji in raw title. Forcing custom emoji ID: ${fallbackId} (${fallbackChar}). Title: "${cleanName}"`);
               }
 
               const editOptions: any = { name: cleanName };
@@ -553,6 +612,8 @@ export function setupBot() {
                 await db.collection('users').doc(chatId).collection('topics').doc(threadStr).set({
                   renamed: true,
                   title: cleanName,
+                  emoji: parsed.emoji || null,
+                  customEmojiId: customEmojiId || null,
                   updatedAt: new Date()
                 }, { merge: true });
               }
@@ -648,6 +709,17 @@ export function setupBot() {
 
       // 4.5. Gemini арқылы мәтінді түзетіп алу
       const correctedText = await correctTranscribedText(transcribedText);
+
+      // Егер модель түсініксіз текстке нақтылау сұраса (промпт талабына сай), оны бірден пайдаланушыға жібереміз
+      if (correctedText.includes('Кешіріңіз') && correctedText.includes('түсіне алмадым') || correctedText.includes('нақтылап')) {
+        await sendRawTelegramApi('sendRichMessageDraft', {
+            chat_id: chatId,
+            draft_id: draftId,
+            message_thread_id: targetThreadId,
+            rich_message: { html: correctedText }
+        });
+        return; // RAG-қа жібермейміз
+      }
 
       // 5. RAG ядромызға танылған әрі түзетілген мәтінді бағыттау
       await handleIncomingMessage(ctx, correctedText, true);
@@ -874,7 +946,7 @@ export function setupBot() {
          console.error(`[⚠️] submit rich message error:`, e);
          const pOpts = { ...extraOptions };
          delete pOpts.reply_parameters;
-         const pText = txt.replace(/<[^>]*>?/gm, '');
+         const pText = txt.replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]*>?/gm, '');
          if (currentBotMsgId) {
              botSentMsg = await ctx.telegram.editMessageText(chatId, currentBotMsgId, undefined, pText, pOpts);
          } else {

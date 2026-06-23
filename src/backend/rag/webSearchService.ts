@@ -1,5 +1,6 @@
 import 'dotenv/config';
 import { GoogleAuth } from 'google-auth-library';
+import { ai } from './aiClient';
 
 export interface WebSearchResult {
   title: string;
@@ -89,7 +90,46 @@ export async function search_official_kazakh_fatwas(query: string): Promise<WebS
     console.error(`[🚨 Web Search] Vertex AI Search failed:`, err.message || err);
   }
 
-  console.warn(`[⚠️ Web Search] No search credentials configured or Vertex AI Search failed. Falling back empty.`);
+  console.warn(`[⚠️ Web Search] No search credentials configured or Vertex AI Search failed. Falling back to Gemini Google Search Grounding...`);
+  
+  try {
+    const fallbackResponse = await ai.models.generateContent({
+      model: "gemini-3.5-flash",
+      contents: `Іздеу: ${queryClean} (сайты: muftyat.kz немесе fatua.kz)`,
+      config: {
+        tools: [{ googleSearch: {} }],
+        systemInstruction: "You are an official Kazakh Islamic fatwas search helper. Perform a Google search focusing on the official domains muftyat.kz or fatua.kz to find precise articles matching the query.",
+      },
+    });
+
+    const chunks = fallbackResponse.candidates?.[0]?.groundingMetadata?.groundingChunks;
+    if (chunks && Array.isArray(chunks)) {
+      const results: WebSearchResult[] = [];
+      const seenUrls = new Set<string>();
+
+      for (const chunk of chunks) {
+        if (chunk.web && chunk.web.uri) {
+          const url = chunk.web.uri;
+          if (seenUrls.has(url)) continue;
+          seenUrls.add(url);
+
+          results.push({
+            title: chunk.web.title || 'ҚМДБ Пәтуасы',
+            url: url,
+            snippet: fallbackResponse.text ? fallbackResponse.text.substring(0, 600) : 'ҚМДБ ресми пәтуасы мен діни шешімі.',
+          });
+        }
+      }
+
+      if (results.length > 0) {
+        console.log(`[🌐 Web Search Fallback] Gemini Google Search Grounding returned ${results.length} results.`);
+        return results;
+      }
+    }
+  } catch (fallbackErr: any) {
+    console.error(`[🚨 Web Search Fallback] Gemini Google Search Grounding failed:`, fallbackErr.message || fallbackErr);
+  }
+
   return [];
 }
 

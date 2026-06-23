@@ -98,6 +98,39 @@ export function formatTelegramMessage(text: string, quranSources: any[] = []): s
     }
   }
 
+  // 1.5 Ensure <audio> tag is appended right after the </aside> blocks or citations for Quran verses if not already present
+  if (quranSources && quranSources.length > 0) {
+    for (const src of quranSources) {
+      if (!src.isQuran || !src.audio_url) continue;
+
+      const surahKk = src.book.replace(" сүресі", "").trim().toLowerCase();
+      const verseNum = src.page || 1;
+
+      const escapedSurah = surahKk.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+
+      // First check if the audio URL is already in the document as an <audio> tag to avoid duplicate players
+      if (formatted.includes(`<audio src="${src.audio_url}"`) || formatted.includes(`<audio src='${src.audio_url}'`)) {
+        continue;
+      }
+
+      // Try matching the <aside> block if it contains the surah name and verse number
+      const asidePattern = new RegExp(`(<aside(?:[\\s\\S]*?)${escapedSurah}(?:[\\s\\S]*?)${verseNum}(?:[\\s\\S]*?)<\/aside>)(?:\\s*<audio\\s+src="[^"]+"\\s*><\\/audio>)?`, 'gi');
+      let replaced = false;
+      formatted = formatted.replace(asidePattern, (match, asideBlock) => {
+        replaced = true;
+        return `${asideBlock}\n<audio src="${src.audio_url}"></audio>`;
+      });
+
+      // Fallback: match the citation parenthesis anywhere in the core message (handles when citation is outside the aside block)
+      if (!replaced) {
+        const citationPattern = new RegExp(`(\\((?:[^)]|\\([^)]*\\))*?${escapedSurah}(?:[^)]|\\([^)]*\\))*?${verseNum}(?:[^)]|\\([^)]*\\))*?\\))(?:\\s*<audio\\s+src="[^"]+"\\s*><\\/audio>)?`, 'gi');
+        formatted = formatted.replace(citationPattern, (match, citationBlock) => {
+          return `${citationBlock}\n<audio src="${src.audio_url}"></audio>`;
+        });
+      }
+    }
+  }
+
   // 2. Мәтін ішіндегі кез келген Құран аяттарына сілтемелерді автоматты түрде тауып, Quran.com сілтемесіне айналдыру
   const surahKeys = Object.keys(KAZ_SURAHS).sort((a, b) => b.length - a.length);
   const escapedSurahs = surahKeys.map(k => k.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')).join('|');
@@ -135,6 +168,14 @@ export function formatTelegramMessage(text: string, quranSources: any[] = []): s
   formatted = formatted.replace(/<(table|thead|tbody|tr|th|td|ul|ol|li)([^>]*)>\s*(?:<br\s*\/?>\s*)+/gi, '<$1$2>');
   formatted = formatted.replace(/(?:<br\s*\/?>\s*)+<\/(table|thead|tbody|tr|th|td|ul|ol|li)>/gi, '</$1>');
 
+  // Remove block/table/list spacing issues that might contain newlines turned into <br> style spacing
+  formatted = formatted.replace(/(<\/tr>|<\/thead>|<\/tbody>|<table>)\s*(?:<br\s*\/?>\s*)+(<tr>|<thead>|<tbody>|<\/table>)/gi, '$1$2');
+  formatted = formatted.replace(/(<tr>|<thead>|<tbody>)\s*(?:<br\s*\/?>\s*)+(<tr>|<thead>|<tbody>|<th>|<td>)/gi, '$1$2');
+  formatted = formatted.replace(/(<\/th>|<\/td>)\s*(?:<br\s*\/?>\s*)+(<th>|<td>|<\/tr>)/gi, '$1$2');
+
+  // Remove any <br> tags between adjacent list items or list structural tags (like </li><br><li>, </li><br></ul>, etc.)
+  formatted = formatted.replace(/(<\/li>|<\/ul>|<\/ol>)\s*(?:<br\s*\/?>\s*)+(?=<li>|<ul>|<ol>|<\/ul>|<\/ol>)/gi, '$1');
+
   // 1. Strip any <br> tags before and after <hr/> completely as requested ("екі <br><br> дегеннің екеуін де өшір. Сызық үшін керек емес.")
   formatted = formatted.replace(/(?:<br\s*\/?>\s*)*<hr\s*\/?>\s*(?:<br\s*\/?>\s*)*/gi, '<hr/>');
 
@@ -144,8 +185,21 @@ export function formatTelegramMessage(text: string, quranSources: any[] = []): s
   // 3. Reduce multiple <br> tags before <cite> tags inside asides to a single <br> ("басындағы екі <br><br> лі бір ғана <br> ге ауыстыр")
   formatted = formatted.replace(/(?:<br\s*\/?>\s*){2,}(?=<cite\b)/gi, '<br>');
 
+  // 3.5 Reduce multiple <br> tags before closing blockquote or aside tags to a single <br>
+  formatted = formatted.replace(/(?:<br\s*\/?>\s*){2,}(?=<\/blockquote>|<\/aside>)/gi, '<br>');
+
   // 4. Remove trailing <br> tags after blockquote or aside closing tags entirely ("соңындағы екі <br><br> ді өшіріп тастай сал, соңына керек емес.")
   formatted = formatted.replace(/(<\/blockquote>|<\/aside>)\s*(?:<br\s*\/?>\s*)+/gi, '$1');
+
+  // 4.5 Clean up any spacing before "Мағынасы мен Хикметі" or "Мағынасы мен Зикметі" to make it very close and compact to the audio tag
+  // Remove any <br> immediately inside <b> tag at the start of "Мағынасы мен [ХхЗз]икметі"
+  formatted = formatted.replace(/<b>\s*<br\s*\/?>\s*(Мағынасы мен [ХхЗз]икметі)/gi, '<b>$1');
+  // Reduce multiple breaks between </aside> or <audio> or <hr/> and "Мағынасы мен [ХхЗз]икметі" to at most a single break
+  formatted = formatted.replace(/(?:<\/aside>|<audio\s+src="[^"]+"\s*><\/audio>|<hr\s*\/?>)\s*(?:<br\s*\/?>\s*){2,}(?=<b>\s*Мағынасы мен [ХхЗз]икметі)/gi, '$1<br>');
+  formatted = formatted.replace(/(?:<\/aside>|<audio\s+src="[^"]+"\s*><\/audio>|<hr\s*\/?>)\s*(?:<br\s*\/?>\s*){2,}(?=Мағынасы мен [ХхЗз]икметі)/gi, '$1<br>');
+
+  // 4.6 Ensure <hr/> is always drawn AFTER the <audio> player, not above/before it (prevent line overlapping or drawing on top of audio)
+  formatted = formatted.replace(/(<hr\s*\/?>)\s*(?:<br\s*\/?>\s*)*(<audio\s+src="[^"]+"\s*><\/audio>)/gi, '$2$1');
 
   // Restore preserved <details>...</details> blocks untouched
   for (let i = 0; i < detailsBlocks.length; i++) {

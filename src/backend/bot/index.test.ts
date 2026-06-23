@@ -90,12 +90,12 @@ describe('Bot Setup & Helpers', () => {
 
     it('replaces list asterisk lines with bullet characters', () => {
       const result = formatTelegramMessage('* бірінші\n* екінші');
-      expect(result).toBe('• бірінші\n• екінші');
+      expect(result).toBe('• бірінші<br>• екінші');
     });
 
     it('reduces three or more blank lines to maximum two blank lines', () => {
       const result = formatTelegramMessage('Қатар 1\n\n\n\nҚатар 2');
-      expect(result).toBe('Қатар 1\n\nҚатар 2');
+      expect(result).toBe('Қатар 1<br><br>Қатар 2');
     });
 
     it('successfully embeds blue HTML links for matched Quran verses from sources', () => {
@@ -125,31 +125,47 @@ describe('Bot Setup & Helpers', () => {
     it('converts markdown lines starting with > into HTML asides', () => {
       const text = '> Бұл қысқа дәйексөз';
       const result = formatTelegramMessage(text);
-      expect(result).toBe('<aside>\nБұл қысқа дәйексөз\n</aside>');
+      expect(result).toBe('<br><aside><br>Бұл қысқа дәйексөз<br></aside>');
     });
 
     it('converts multiple separate asides with normal text in between', () => {
       const text = '> Бірінші дәйексөз\nҚалыпты мәтін осында.\n> Екінші дәйексөз';
       const result = formatTelegramMessage(text);
-      expect(result).toBe('<aside>\nБірінші дәйексөз\n</aside>\nҚалыпты мәтін осында.\n<aside>\nЕкінші дәйексөз\n</aside>');
+      expect(result).toBe('<br><aside><br>Бірінші дәйексөз<br></aside>Қалыпты мәтін осында.<br><aside><br>Екінші дәйексөз<br></aside>');
     });
 
     it('converts asides with mixed content inside', () => {
       const text = '> **Алла Елшісі** айтты:\n> *«Амалдар ниетке байланысты»*';
       const result = formatTelegramMessage(text);
-      expect(result).toBe('<aside>\n<b>Алла Елшісі</b> айтты:\n<i>«Амалдар ниетке байланысты»</i>\n</aside>');
+      expect(result).toBe('<br><aside><br><b>Алла Елшісі</b> айтты:<br><i>«Амалдар ниетке байланысты»</i><br></aside>');
     });
 
     it('converts long markdown blockquotes to aside', () => {
       const text = '> Бірінші жол\n> Екінші жол\n> Үшінші жол\n> Төртінші жол';
       const result = formatTelegramMessage(text);
-      expect(result).toBe('<aside>\nБірінші жол\nЕкінші жол\nҮшінші жол\nТөртінші жол\n</aside>');
+      expect(result).toBe('<br><aside><br>Бірінші жол<br>Екінші жол<br>Үшінші жол<br>Төртінші жол<br></aside>');
     });
 
     it('converts long markdown blockquotes (longer than 200 chars) to aside', () => {
       const longQuote = '> ' + 'A'.repeat(210);
       const result = formatTelegramMessage(longQuote);
-      expect(result).toBe(`<aside>\n${'A'.repeat(210)}\n</aside>`);
+      expect(result).toBe(`<br><aside><br>${'A'.repeat(210)}<br></aside>`);
+    });
+
+    it('appends <audio> tags after citations correctly using either aside block or citation parenthesis fallback', () => {
+      const quranSources = [
+        { isQuran: true, book: 'Ниса сүресі', page: 103, audio_url: 'https://audio.qurancdn.com/Nisa_103.mp3' }
+      ];
+
+      // Test 1: Citation outside the aside block
+      const text1 = '<aside>\n«уақыттарда парыз етілді»\n</aside>\n(Ниса сүресі, 103-аят (тыңдау))';
+      const result1 = formatTelegramMessage(text1, quranSources);
+      expect(result1).toContain('<audio src="https://audio.qurancdn.com/Nisa_103.mp3"></audio>');
+
+      // Test 2: Citation inside the aside block
+      const text2 = '<aside>\n«уақыттарда парыз етілді»\n(Ниса сүресі, 103-аят)\n</aside>';
+      const result2 = formatTelegramMessage(text2, quranSources);
+      expect(result2).toContain('<audio src="https://audio.qurancdn.com/Nisa_103.mp3"></audio>');
     });
   });
 

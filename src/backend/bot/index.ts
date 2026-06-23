@@ -349,7 +349,7 @@ export function setupBot() {
         const cachedData = pendingSourcesCache.get(cacheKey);
         if (cachedData) {
           if (cachedData.answer) {
-            cachedAnswerToUse = cachedData.answer; // Prioritize original factual answer for perfect highlight overlap
+            cachedAnswerToUse = cachedData.answer; // Prioritize original factual answer for consistent source reference
           }
           if (cachedData.query) {
             originalQuery = cachedData.query;

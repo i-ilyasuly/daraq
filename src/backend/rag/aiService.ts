@@ -44,21 +44,13 @@ async function getChatHistory(chatId: string, threadId?: string | number) {
       .limit(20)
       .get();
     
-    if (snapshot.empty) {
-      console.log(`[getChatHistory] Loaded 0 messages for chatId: ${chatId}, threadId: ${threadStr}`);
-      return [];
-    }
+    if (snapshot.empty) return [];
 
     const messages = snapshot.docs.map(doc => doc.data());
     const formattedHistory = messages.reverse().map(msg => ({
       role: msg.role === 'bot' ? 'model' : 'user',
       parts: [{ text: msg.text }]
     }));
-
-    console.log(`[getChatHistory] Loaded ${formattedHistory.length} messages for chatId: ${chatId}, threadId: ${threadStr}`);
-    formattedHistory.forEach((m, idx) => {
-      console.log(`  [History msg ${idx}] Role: ${m.role}, Prefixed Text: "${m.parts[0].text.substring(0, 60)}..."`);
-    });
 
     return formattedHistory;
   } catch (error) {
@@ -222,27 +214,45 @@ export async function generateAgentAnswerStream(
             const threadStr = (threadId !== undefined && threadId !== null) ? String(threadId) : 'general';
             const cachedDoc = await db.collection('users').doc(chatId).collection('topics').doc(threadStr).collection('latestSources').doc('current').get();
             if (cachedDoc.exists) {
-                return cachedDoc.data()?.sources as SearchResult[] || [];
+                const cachedData = cachedDoc.data();
+                if (cachedData && cachedData.sources && cachedData.sources.length > 0) {
+                    console.log(`[aiService] Restored ${cachedData.sources.length} cached sources for proof inquiry.`);
+                    return cachedData.sources as SearchResult[];
+                }
             }
         } catch (e) {
-            console.error("[⚠️ Error loading proof sources]:", e);
+            console.error('[⚠️] Error fetching cached latest sources inside aiService:', e);
         }
-        return [];
-    })() : Promise.resolve([]);
+        return [] as SearchResult[];
+    })() : Promise.resolve([] as SearchResult[]);
 
-    const [history, cacheResult, cachedSources] = await Promise.all([
+    // Күту
+    const [rawHistory, { hit, vector }, cachedSources] = await Promise.all([
         historyPromise,
         cachePromise,
         proofSourcesPromise
     ]);
 
-    const { hit, vector } = cacheResult;
-    const hasHistory = history.length > 0;
-    let queryWithContext = query;
+    // Тарихты форматтау
+    if (rawHistory.length > 0) {
+        const lastMsg = rawHistory[rawHistory.length - 1];
+        if (lastMsg.role === 'user' && lastMsg.parts[0].text === query) {
+             rawHistory.pop();
+        }
+    }
 
-    if (hasHistory && history[history.length - 1].role === 'user') {
-        const lastUser = history[history.length - 1];
-        queryWithContext = `[Алдыңғы хабарлама]: ${lastUser.parts[0].text}\n\n[Жаңа сұрақ]: ${query}`;
+    const history: {role: string, parts: any[]}[] = [];
+    for (const msg of rawHistory) {
+        if (history.length === 0) {
+            history.push(msg);
+        } else {
+            const lastMsg = history[history.length - 1];
+            if (lastMsg.role === msg.role) {
+                lastMsg.parts[0].text += `\n\n${msg.parts[0].text}`;
+            } else {
+                history.push(msg);
+            }
+        }
     }
 
     // Егер кэштен табылса (Hit)
@@ -253,36 +263,14 @@ export async function generateAgentAnswerStream(
         const dayOfWeekC = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Almaty" })).getDay();
         const fastCachePrompt = `Сен — Daraq, Ханафи мазһабының виртуалды ұстазысың. Пайдаланушы қойған сұраққа бұрын жауап берілген. Төмендегі дайын жауаптың мағынасын сақтай отырып, оны пайдаланушы үшін жаңадан, жылы әрі табиғи етіп қайта құрастырып бер.
 Ережелер:
-1. HTML ТЕГТЕРІН ҚОЛДАН: <b> (жуан мәтін), <i> (көлбеу мәті�        return {
-            answer: fastAnswerText,
-            sources: hit.sources,
-            intent: 'KNOWLEDGE_SEARCH'
-        };
-    }
-
-    // Intent пен толықтықты анықтау (Smart Router)
-    let routerResult: RouterResult;санаты анықталды: ${intent}, толықтығы (is_complete): ${routerResult.is_complete}`);
-
-    let searchInput = routerResult.refined_query || query;
-    let currentPrompt = searchInput;
-
-    if (history.length > 0 && history[history.length - 1].role === 'user') {
-        const lastUser = history.pop();
-        if (lastUser) {
-            currentPrompt = `[Алдыңғы хабарлама]: ${lastUser.parts[0].text}\n\n[Жаңа сұрақ]: ${currentPrompt}`;
-        }
-    }
-
-    if (effectiveLang === 'ru') {
-        currentPrompt = `[⚠️ ПЕРЕВОД: Отвечай only на РУССКОМ языке]\n` + currentPrompt;
-    } else if (effectiveLang === 'en') {
-        currentPrompt = `[⚠️ TRANSLATION: Reply strictly in ENGLISH]\n` + currentPrompt;
-    }
-    
-    const dayOfWeekCC = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Almaty" })).getDay();
-    if (dayOfWeekCC === 5) {
-        currentPrompt = `[⚠️ БҮГІН ЖҰМА: Бұл қасиетті Жұма күні. Жауабыңа «Жұма мүбәрак болсын! 🎊» мағынасындағы құттықтауды қос]\n` + currentPrompt;
-    }�раф ретінде жаз және астынан тағы екі бос жол таста. Оны жиналатын блокқа (<blockquote expandable>) салудың мүлдем қажеті ЖОҚ.
+1. HTML ТЕГТЕРІН ҚОЛДАН: <b> (жуан мәтін), <i> (көлбеу мәтін), <aside> (дәйексөздер). Ескі жауаптағы Құран аяттарының аудармаларын, Хадистерді немесе ғалымдардың/кітаптардың тікелей үзінділерін («кітапта жазылған үзінділер») тауып, оларды міндетті түрде <aside>...</aside> тегтерінің ішіне ал! Ескі жауапта бұрыннан бар <aside>...</aside> немесе <blockquote>...</blockquote> дәйексөз форматтауларын мүлтіксіз сақтап, қайта құрастырғанда да <aside>...</aside> дәйексөз ретінде қалдыр.
+2. Маркдаун белгілерін (мысалы, *, **) МҮЛДЕМ ҚОЛДАНБА. Тізімдер үшін қарапайым минус (-) сызықшасын немесе • (нүкте) таңбасын қолдан.
+3. Мәтін тым тығыз болмауы үшін абзацтар арасына кішігірім бос орын (жаңа жол) қалдыр.
+4. "Бұл туралы толық мәліметті... төмендегі батырманы басып..." деген сияқты БАТЫРМАҒА сілтейтін сөздерді АЛЫП ТАСТА, өйткені батырманы жүйе өзі қосады. Жай ғана жауапвтың өзін әдемілеп бер.
+5. КӨПТІЛДІ ДІНИ ӘДЕП (Multilingual Islamic Adab): ЕШҚАШАН (с.а.с), (r.а), (а.с), pbuh, ﷺ сияқты қысқартуларды/символдарды қолданбау. Толыққанды мадақ-дұғаларды ЖАҚШАҒА АЛЫП (мысалы: "<i>(Алланың оған игілігі мен сәлемі болсын)</i>" немесе "<i>(мир ему и благословение Аллаха)</i>") тілге бейімдеп, міндетті түрде <i>(...)</i> (көлбеу және жақша ішінде) тегінің ішіне толық жаз.
+6. БАСЫНДАҒЫ СӘЛЕМДЕСУ ЖӘНЕ ДҰҒА СТИЛІ: Мәтіннің ең басындағы сәлемдесу, жылы бата-тілек және басты жауап (үкім) мүлдем бір параграфта бірігіп біртұтас қабырға болып тұрмауы тиіс:
+   - Бірінші сәтте тек қана жылы сәлемдесуді жеке өз дара жолы ретінде беріп, одан кейін екі бос жол таста (мысалы: "Ассалаумағалейкум уа рахматуллаһи уа бәрәкәтүһ! 🌸" немесе "Ассаламу алейкум ва рахматуллахи ва баракатух! 🌸").
+   - Сәлемдесуден соң, жауап таңдалған жағдайға сай жылы бата-тілегіңді кәдімгі қарапайым қаріптермен бөлек, дербес параграф ретінде жаз және астынан тағы екі бос жол таста. Оны жиналатын блокқа (<blockquote expandable>) салудың мүлдем қажеті ЖОҚ.
    - Одан кейін бірден басқа мәтін мен <h2>Басты үкім</h2> тақырыпшасын бастап, нақты үкімін ерекшелеп бер.
 ${effectiveLang === 'ru' ? '7. ⚠️ ПЕРЕВОД: Обязательно переведи и дай ответ на РУССКОМ языке.' : ''}
 ${effectiveLang === 'en' ? '7. ⚠️ TRANSLATION: Must translate and reply in ENGLISH.' : ''}
@@ -446,7 +434,7 @@ ${hit.answer}
     ].join("\n");
     const quranRefs = parseQuranReferences(combinedTextsToParse);
 
-    let quranResults: SearchResult[] = [];
+    let quranResults = [];
     if (quranRefs.length > 0) {
       console.log(`[🔎] Extracted Quran references to fetch: ${JSON.stringify(quranRefs)}`);
       const fetchPromises = quranRefs.map(async (ref) => {
@@ -462,7 +450,7 @@ ${hit.answer}
               isQuran: true,
               url: verse.quranComUrl,
               audio_url: verse.audio_url
-            } as SearchResult;
+            };
           }
         } catch (e) {
           console.error(`[⚠️ Quran fetch error for ${ref}]:`, e);
@@ -470,7 +458,7 @@ ${hit.answer}
         return null;
       });
       const resolved = await Promise.all(fetchPromises);
-      quranResults = resolved.filter((r): r is SearchResult => r !== null);
+      quranResults = resolved.filter(r => r !== null);
       console.log(`[✅] Fetched ${quranResults.length} Quran verses.`);
     }
 
@@ -486,34 +474,35 @@ ${hit.answer}
         }
     }
 
-    // LLM-ге арналған контекстті құрастыру
     let contextText = "";
-    
-    const booksFound = usedSources.filter(s => !s.isQuran && s.book !== "ҚМДБ Пәтуасы");
-    const quranFound = usedSources.filter(s => s.isQuran);
-    
-    if (booksFound.length > 0) {
-        contextText += "=== [ХАНАФИ МАЗҺАБЫ БОЙЫНША ТАБЫЛҒАН ДЕРЕККӨЗДЕР] ===\n";
-        contextText += booksFound.map((c, i) => 
-            `[Дереккөз ${i + 1}] КІТАП АТЫ: "${c.book}", БЕТІ: ${c.page}\nҚҰРАМЫНДАҒЫ МӘТІН: ${c.text}`
-        ).join('\n\n') + "\n\n";
-    }
-    
-    if (quranFound.length > 0) {
-        contextText += "=== [ҚҰРАН АЯТТАРЫНАН ТАБЫЛҒАН СЕНІМДІ ДЕРЕКТЕР] ===\n";
-        contextText += quranFound.map((r, i) =>
-            `[Құран аяты ${i + 1}] СҮРЕ: "${r.book}", АЯТ НӨМІРІ: ${r.page}\nАРАБША: ${r.text.split('\n')[0]}\nАУДАРМАСЫ: ${r.text.split('\n').slice(1).join('\n')}${r.audio_url ? `\nАУДИО СІЛТЕМЕСІ: ${r.audio_url}` : ''}`
-        ).join('\n\n') + "\n\n";
+
+    // 1. Quran Verses first
+    const quranVerses = usedSources.filter(s => s.isQuran);
+    if (quranVerses.length > 0) {
+        contextText += "=== [ҚАСИЕТТІ ҚҰРАН АЯТТАРЫ] ===\n";
+        quranVerses.forEach(q => {
+            contextText += `[Құран: ${q.book}, ойнату сілтемесі ${q.url || ''}]\nМәтіні (Арабша): ${q.text}\n\n`;
+        });
     }
 
+    // 2. Books
+    const books = usedSources.filter(s => !s.isQuran && s.book !== "ҚМДБ Пәтуасы");
+    if (books.length > 0) {
+        contextText += "=== [ДІНИ-ҒЫЛЫМИ КІТАПТАРДАН ДЕРЕККӨЗДЕР] ===\n";
+        books.forEach((b, idx) => {
+            contextText += `Дереккөз #${idx + 1} (&quot;${b.book}&quot;, бет ${b.page || 'беймәлім'}):\n${b.text}\n\n`;
+        });
+    }
+
+    // 3. Web fatwas
     if (webSourcesJoined) {
-        contextText += "=== [ҚМДБ РЕСМИ САЙТЫНАН (MUFTYAT.KZ/FATUA.KZ) ТАБЫЛҒАН ҚАЗІРГІ ЗАМАНҒЫ ПӘТУАЛАР] ===\n";
+        contextText += "=== [ҚМДБ РЕСМИ САЙТЫНАН ЗАМАНАУИ ПӘТУАЛАР] ===\n";
         contextText += webSourcesJoined + "\n\n";
     }
 
     if (!contextText) {
-        contextText = `НАЗАР АУДАРЫҢЫЗ (ҚАТАҢ ЕРЕЖЕ): Дерекқордан да, Құраннан да бұл тақырыпқа қатысты ешбір нақты діни дерек табылмады немесе сәйкестік деңгейі тым төмен болды (Score Threshold).
-Қолданушыға қате мәлімет (галлюцинация) бермеу үшін, сен міндетті түрде дәл осылай немесе осыған өте жақын мағынада жұмсақ түрде жауап бер:
+        contextText = `НАЗАР АУДАРЫҢЫЗ (ҚАТАҢ ЕРЕЖЕ): Дерекқордан да, Құраннан да бұл тақырыпқа қатысты ешбір нақты діни дерек табылдады немесе сәйкестік деңгейі тым төмен болды (Score Threshold).
+Қолданушыға қате мәлімет (галлюцинация) бермеуі үшін, сен міндетті түрде дәл осылай немесе осыған өте жақын мағынада жұмсақ түрде жауап бер:
 "Кешіріңіз, маған жүктелген Ханафи мазһабының сенімді кітаптарынан бұл мәселенің нақты үкімін таба алмадым. Сондықтан сізге қате мәлімет бермеу үшін бұл сұраққа жауап бере алмаймын."
 Өз атыңнан ешқандай үкім, факт немесе жалған кітап атын ойдан құрастырмауға қатаң бұйырамын!`;
     }
@@ -523,9 +512,9 @@ ${hit.answer}
     // Промпт дайындау
     let langInstruction = "";
     if (effectiveLang === 'ru') {
-        langInstruction = "\n⚠️ ТІЛДІК ЕРЕЖЕ (Language Mirroring): Пайдаланушының тілі немесе сұрақ қойған тілі — орыс тілі (ru). Сондықтан жауапты МІНДЕТТІ ТҮРДЕ ОРЫС ТІЛІНДЕ (strictly and only on Russian language) беріңіз. Барлық түсіндірулер мен қорытындылар орысша болуы шарт. Егер Qdrant базасынан немесе ҚМДБ пәтуаларынан келген сенімді мәліметтер (context) тек Қазақ тілінде болса, сол қазақша мәліметтерді еш бұрмаламай, мағынасын 100% сақтай отырып, орыс тіліне өзіңіз ақылды түрде аударып жауап беріңіз. Діни әдеп дұғалары мен бата-тілектер де орыс тілінде толыққанды, табиғи түрде жазылсын (мысалы: «да будет доволен им Аллах», «мир ему», «да помилует его Аллах», «пусть Аллах дарует вам полезные знания» және т.б. қолданылсын).\n";
+        langInstruction = "\n⚠️ ТІЛДІК ЕРЕЖЕ (Language Mirroring): Пайдаланушының тілі немесе сұрақ қойған тілі — орыс тілі (ru). Сондықтан жауапты МІНДЕТТІ ТҮРДЕ ОРЫС ТІЛІНДЕ (strictly and only on Russian language) беріңіз. Барлық түсіндірулер мен қорытынбылар орысша болуы шарт. Егер Qdrant базасынан немесе ҚМДБ пәтуаларынан келген сенімді мәліметтер (context) КҮШТІ және Қазақ тілінде болса, сол қазақша мәліметтерді еш бұрмаламай, мағынасын 100% сақтай отырып, орыс тіліне өзіңіз ақылды түрде аударып жауап беріңіз. Діни әдеп дұғалары мен бата-тілектер де орыс тілінде толыққанды, табиғи түрде жазылсын (мысалы: «да будет доволен им Аллах», «мир ему», «да помилует его Аллах», «пусть Аллах дарует вам полезные знания» және т.б. қолданылсын).\n";
     } else if (effectiveLang === 'en') {
-        langInstruction = "\n⚠️ ТІЛДІК ЕРЕЖЕ (Language Mirroring): Пайдаланушының тілі немесе сұрақ қойған тілі — ағылшын тілі (en). Жауапты МІНДЕТТІ ТҮРДЕ АҒЫЛШЫН ТІЛІНДЕ (strictly in English) беріңіз. Егер Qdrant базасынан келген сенімді мәліметтер (context) тек Қазақ тілінде болса, сол қазақша мәліметтерді еш бұрмаламай, мағынасын 100% сақтай отырып, ағылшын тіліне өзіңіз ақылды түрде аударып жауап беріңіз. Діни әдеп дұғалары мен бата-тілектер де ағылшын тілінде толыққанды, табиғи түрде жазылсын (мысалы: «peace and blessings of Allah be upon him», «peace be upon him», «may Allah be pleased with him», «may Allah bless you with useful knowledge» және т.б. қолданылсын).\n";
+        langInstruction = "\n⚠️ ТІЛДІК ЕРЕЖЕ (Language Mirroring): Пайдаланушының тілі немесе сұрақ қойған тілі — ағылшын тілі (en). Жауапты МІНДЕТТІ ТҮРДЕ АҒЫЛШЫН ТІЛІНДЕ (strictly in English) беріңіз. Егер Qdrant базасынан келген сенімді мәліметтер (context) КҮШТІ және Қазақ тілінде болса, сол қазақша мәліметтерді еш бұрмаламай, мағынасын 100% сақтай отырып, ағылшын тіліне өзіңіз ақылды түрде аударып жауап беріңіз. Діни әдеп дұғалары мен бата-тілектер де ағылшын тілінде толыққанды, табиғи түрде жазылсын (мысалы: «peace and blessings of Allah be upon him», «peace be upon him», «may Allah be pleased with him», «may Allah bless you with useful knowledge» және т.б. қолданылсын).\n";
     }
 
     const dayOfWeekK = new Date(new Date().toLocaleString("en-US", { timeZone: "Asia/Almaty" })).getDay();
@@ -544,8 +533,8 @@ ${contextText}
 
 ⚠️ МАҢЫЗДЫ ЕРЕЖЕ СЕКЦИЯСЫ:
 Пайдаланушыға осы контекстте бар мәлімет аясында Ханафи мазһабының ұстазы ретінде (Persona-ға сәйкес) жауап бер.
-Егер жауапта Құраннан аяттар немесе дәлелдер келтірілетін болса (мейлі олар басқа кітаптардан немесе сайт мәтіндерінен табылса да), сен оларды міндетті түрде нақты Құран аяттарының дерегінен (Құран құралдары айқындап берген АРАБША және АУДАРМАСЫ бөлімдерінен) сәйкестендіріп тауып ал. Ешқашан аятты тек қазақша аударма күйінде жаза салма! Әрқашан алдымен арабшасын жазып, одан кейін ғана аудармасын және соңына тиісті форматтағы сілтемесін қос.
-Қосылатын аяттарды міндетті түрде бір тұтас <aside>...</aside> блогының ішінде, арабшасы мен қазақша аудармасының арасына нақты бос жолдар (абзацтар) тастау арқылы жаз. Telegram-да қателік тудыратын ішкі немесе қабатталған (nested) <aside> тегтерін қолданба! СТРИКТТІ түрде мына формат бойынша жаз (арабша мәтіні, қазақша аудармасы және сілтемесі бір ғана <aside> тегінің ішінде болады, бірақ олардың арасында міндетті түрде екі бос жол (\n\n) тасталып, ал сілтемесі <cite>...</cite> тегімен ерекшеленеді):
+Егер жауапта Құрантан аяттар немесе дәлелдер келтірілетін болса (мейлі олар басқа кітаптардан немесе сайт мәтіндерінен табылса да), сен оларды міндетті түрде нақты Құран аяттарының дерегінен (Құран құралдары айқындап берген АРАБША және АУДАРМАСЫ бөлімдерінен) сәйкестендіріп тауып ал. Ешқашан аятты тек қазақша аударма күйінде жаза салма! Әрқашан алдымен арабшасын жазып, одан кейін ғана аудармасын және соңына тиісті форматтағы сілтемесін қос.
+Қосылатын аяттарды міндетті түрде бір тұтас <aside>...</aside> блогының ішінде, арабшасы мен қазақша аудармасының арасына нақты бос жолдар (абзацтар) тастау арқылы жаз. Telegram-да қателік тудыратын ішкі немесе қабатталған (nested) <aside> тегтерін қолданба! СТРИКТТІ түрде мына формат бойынша жаз (арабша мәтіні, қазақша аудармасы және сілтемесі бір ғана <aside> тегінің ішінде болады, бірақ олардың арасында міндетті түрде екі бос жол (\\n\\n) тасталып, ал сілтемесі <cite>...</cite> тегімен ерекшеленеді):
 <aside>
 [АРАБША МӘТІН харакаттарымен]
 
@@ -559,7 +548,7 @@ ${contextText}
 
 Жауапты таза HTML элементтерімен (<b>, <aside>) жасап, бірден ағынмен жазуды баста:`;
 
-    const contents: any[] = [
+    const contents = [
       ...history,
       { role: 'user', parts: [{ text: finalPrompt }] }
     ];

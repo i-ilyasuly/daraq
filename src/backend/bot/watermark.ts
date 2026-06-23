@@ -4,7 +4,7 @@ import { storage as customStorage } from '../storage';
 import { transliterateToLatin } from './formatters';
 
 const storage = customStorage || new Storage();
-const PROCESSED_BUCKET = process.env.PROCESSED_IMAGES_BUCKET || 'daraq-497018-daraq-processed-images';
+const PROCESSED_BUCKET = process.env.PROCESSED_IMAGES_BUCKET || process.env.GCS_BUCKET_NAME || 'daraq-497018-daraq-processed-images';
 
 /**
  * Сурет үстіне су белгісін (Watermark) салатын функция
@@ -32,7 +32,7 @@ export async function addWatermark(imageUrl: string, bookName: string, pageNumbe
     const latinBookWithUnderscore = latinBookRaw.replace(/[^a-zA-Z0-9-_]/g, '_');
     const latinBookNoSpacesOrPunctuation = latinBookRaw.replace(/[^a-zA-Z0-9]/g, '');
 
-    const possibleNames = [
+    const possibleNames = Array.from(new Set([
       `${latinBookWithUnderscore}/page_${pageNumber}.png`,
       `${latinBookWithUnderscore}/page_${pageNumber}.jpg`,
       `${latinBookWithUnderscore}/page_${pageNumber}.jpeg`,
@@ -45,7 +45,7 @@ export async function addWatermark(imageUrl: string, bookName: string, pageNumbe
       `${bookName}/page_${pageNumber}.png`,
       `${bookName}/page_${pageNumber}.jpg`,
       `${bookName}/page_${pageNumber}.jpeg`,
-    ];
+    ]));
 
     let fileToDownload: any = null;
     let foundName = '';

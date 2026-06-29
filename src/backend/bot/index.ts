@@ -1040,7 +1040,7 @@ export function setupBot() {
   if (isProduction) {
     if (hasAppUrl) {
       const webhookPath = `/api/bot-webhook`;
-      bot.telegram.setWebhook(`${appUrl}${webhookPath}`).then(() => {
+      bot.telegram.setWebhook(`${appUrl}${webhookPath}`, { drop_pending_updates: true }).then(() => {
         console.log(`[🌐] Webhook successfully set at ${appUrl}${webhookPath}`);
       }).catch((err) => {
         console.error(`[❌] Failed to set webhook at ${appUrl}${webhookPath}:`, err);

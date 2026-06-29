@@ -67,7 +67,7 @@ if (!fs.existsSync(serviceAccountPath) && process.env.FIREBASE_PRIVATE_KEY && pr
 
 // We always want to try Vertex AI with momyn-t1 first as per rules
 let saProjectId = 'momyn-t1'; 
-const hasServiceAccountFile = fs.existsSync(serviceAccountPath);
+const hasServiceAccountFile = validateServiceAccount(serviceAccountPath);
 
 // 1. Initialize Google AI Studio Client (Primary)
 const aiStudioOptions: any = {

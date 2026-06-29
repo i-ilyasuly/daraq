@@ -40,7 +40,19 @@ async function startServer() {
   const webhookPath = `/api/bot-webhook`;
   app.post(webhookPath, (req, res) => {
     if (bot) {
-      bot.handleUpdate(req.body, res);
+      try {
+        bot.handleUpdate(req.body, res).catch((err: any) => {
+          console.error(`[❌ Webhook Error - Async]: Failed to handle webhook update:`, err.message || err);
+          if (!res.headersSent) {
+            res.sendStatus(500);
+          }
+        });
+      } catch (err: any) {
+        console.error(`[❌ Webhook Error - Sync]: Failed to handle webhook update:`, err.message || err);
+        if (!res.headersSent) {
+          res.sendStatus(500);
+        }
+      }
     } else {
       res.sendStatus(500);
     }

@@ -1,4 +1,4 @@
-import { formatTelegramMessage, transliterateToLatin, filterSourcesByResponse, isAskingForProof } from './formatters';
+import { formatTelegramMessage, transliterateToLatin, filterSourcesByResponse, isAskingForProof, formatForStandardTelegramHTML } from './formatters';
 import { Telegraf, Markup } from 'telegraf';
 import { v4 as uuidv4 } from 'uuid';
 import sharp from 'sharp';
@@ -419,11 +419,26 @@ export function setupBot() {
           });
       } catch(e) {
           console.error(`[⚠️] sendRichMessage error:`, e);
-          const pOpts = { ...extraOptions };
+          const pOpts = { ...extraOptions, parse_mode: 'HTML' };
           delete pOpts.reply_parameters;
-          // Fallback if rich message fails
-          const plainText = txt.replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]*>?/gm, '');
-          botSentMsg = await ctx.telegram.sendMessage(chatId, plainText, pOpts);
+          
+          const standardHTML = formatForStandardTelegramHTML(txt);
+          try {
+              botSentMsg = await ctx.telegram.sendMessage(chatId, standardHTML.text, pOpts);
+              // Also send any extracted audios
+              for (const audioUrl of standardHTML.audios) {
+                  try {
+                      await ctx.telegram.sendAudio(chatId, audioUrl);
+                      console.log(`[✅] Sent Quran audio natively to chat ${chatId}: ${audioUrl}`);
+                  } catch(audioErr) {
+                      console.error(`[⚠️] Failed to send Quran audio:`, audioErr);
+                  }
+              }
+          } catch(htmlSendErr) {
+              console.error(`[❌] Standard HTML sendMessage failed, falling back to plain text:`, htmlSendErr);
+              const plainText = txt.replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]*>?/gm, '');
+              botSentMsg = await ctx.telegram.sendMessage(chatId, plainText, { ...pOpts, parse_mode: undefined });
+          }
       }
 
       // Жадқа және дерекқорға сақтау
@@ -667,12 +682,14 @@ export function setupBot() {
       await ctx.telegram.sendChatAction(chatId, 'upload_voice', targetThreadId ? { message_thread_id: targetThreadId } : undefined);
       
       // Бот әрекеті: жағдай статустарының тізіміне дауысты өңдеуді қосу (осылайша жеке жаңа хабарлама ретінде шықпайды)
-      await sendRawTelegramApi('sendRichMessageDraft', {
-          chat_id: chatId,
-          draft_id: draftId,
-          message_thread_id: targetThreadId,
-          rich_message: { html: `<tg-thinking>${formatStatusMessage('Дыбысты талдау')}</tg-thinking>` }
-        });
+      try {
+        await sendRawTelegramApi('sendRichMessageDraft', {
+            chat_id: chatId,
+            draft_id: draftId,
+            message_thread_id: targetThreadId,
+            rich_message: { html: `<tg-thinking>${formatStatusMessage('Дыбысты талдау')}</tg-thinking>` }
+          });
+      } catch (e) {}
 
       // 2. Файл сілтемесін алу
       const fileId = ctx.message.voice.file_id;
@@ -690,34 +707,44 @@ export function setupBot() {
       const transcribedText = await transcribeKazakhVoice(audioBuffer);
 
       if (!transcribedText || transcribedText.trim().length === 0) {
-        await sendRawTelegramApi('sendRichMessageDraft', {
-          chat_id: chatId,
-          draft_id: draftId,
-          message_thread_id: targetThreadId,
-          rich_message: { html: '❌ Дауыстан ештеңе түсіне алмадым. Баяу әрі нақтырақ сөйлеп көріңізші.' }
-        });
+        try {
+          await sendRawTelegramApi('sendRichMessageDraft', {
+            chat_id: chatId,
+            draft_id: draftId,
+            message_thread_id: targetThreadId,
+            rich_message: { html: '❌ Дауыстан ештеңе түсіне алмадым. Баяу әрі нақтырақ сөйлеп көріңізші.' }
+          });
+        } catch(e) {
+          await ctx.reply('❌ Дауыстан ештеңе түсіне алмадым. Баяу әрі нақтырақ сөйлеп көріңізші.');
+        }
         return;
       }
 
       // Түзету статусын көрсету
-      await sendRawTelegramApi('sendRichMessageDraft', {
-          chat_id: chatId,
-          draft_id: draftId,
-          message_thread_id: targetThreadId,
-          rich_message: { html: `<tg-thinking>${formatStatusMessage('Мәтінді түзету')}</tg-thinking>` }
-        });
+      try {
+        await sendRawTelegramApi('sendRichMessageDraft', {
+            chat_id: chatId,
+            draft_id: draftId,
+            message_thread_id: targetThreadId,
+            rich_message: { html: `<tg-thinking>${formatStatusMessage('Мәтінді түзету')}</tg-thinking>` }
+          });
+      } catch(e) {}
 
       // 4.5. Gemini арқылы мәтінді түзетіп алу
       const correctedText = await correctTranscribedText(transcribedText);
 
       // Егер модель түсініксіз текстке нақтылау сұраса (промпт талабына сай), оны бірден пайдаланушыға жібереміз
       if (correctedText.includes('Кешіріңіз') && correctedText.includes('түсіне алмадым') || correctedText.includes('нақтылап')) {
-        await sendRawTelegramApi('sendRichMessageDraft', {
-            chat_id: chatId,
-            draft_id: draftId,
-            message_thread_id: targetThreadId,
-            rich_message: { html: correctedText }
-        });
+        try {
+          await sendRawTelegramApi('sendRichMessageDraft', {
+              chat_id: chatId,
+              draft_id: draftId,
+              message_thread_id: targetThreadId,
+              rich_message: { html: correctedText }
+          });
+        } catch(e) {
+          await ctx.reply(correctedText);
+        }
         return; // RAG-қа жібермейміз
       }
 
@@ -726,12 +753,16 @@ export function setupBot() {
 
     } catch (error: any) {
       console.error('[❌ VOICE TRANSCRIPTION ERROR]:', error);
-      await sendRawTelegramApi('sendRichMessageDraft', {
-          chat_id: chatId,
-          draft_id: draftId,
-          message_thread_id: targetThreadId,
-          rich_message: { html: '❌ Дауысты өңдеу кезінде қателік кетті. Мәтін түрінде жауып көріңізші.' }
-        });
+      try {
+        await sendRawTelegramApi('sendRichMessageDraft', {
+            chat_id: chatId,
+            draft_id: draftId,
+            message_thread_id: targetThreadId,
+            rich_message: { html: '❌ Дауысты өңдеу кезінде қателік кетті. Мәтін түрінде жауып көріңізші.' }
+          });
+      } catch(e) {
+        await ctx.reply('❌ Дауысты өңдеу кезінде қателік кетті. Мәтін түрінде жауып көріңізші.');
+      }
     }
   });
 
@@ -851,7 +882,8 @@ export function setupBot() {
           try {
             const txt = formatStatusMessage(statusText);
             if (currentBotMsgId) {
-               await ctx.telegram.editMessageText(chatId, currentBotMsgId, undefined, `<tg-thinking>${txt}</tg-thinking>`, { parse_mode: 'HTML', disable_web_page_preview: true, link_preview_options: { is_disabled: true } });
+               const standardThinkingText = `<i>⏳ ${txt}</i>`;
+               await ctx.telegram.editMessageText(chatId, currentBotMsgId, undefined, standardThinkingText, { parse_mode: 'HTML', disable_web_page_preview: true, link_preview_options: { is_disabled: true } });
             } else {
                await sendRawTelegramApi('sendRichMessageDraft', {
                  chat_id: chatId,
@@ -944,13 +976,34 @@ export function setupBot() {
          }
       } catch(e) {
          console.error(`[⚠️] submit rich message error:`, e);
-         const pOpts = { ...extraOptions };
+         const pOpts = { ...extraOptions, parse_mode: 'HTML' };
          delete pOpts.reply_parameters;
-         const pText = txt.replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]*>?/gm, '');
-         if (currentBotMsgId) {
-             botSentMsg = await ctx.telegram.editMessageText(chatId, currentBotMsgId, undefined, pText, pOpts);
-         } else {
-             botSentMsg = await ctx.telegram.sendMessage(chatId, pText, pOpts);
+         
+         const standardHTML = formatForStandardTelegramHTML(txt);
+         try {
+             if (currentBotMsgId) {
+                 botSentMsg = await ctx.telegram.editMessageText(chatId, currentBotMsgId, undefined, standardHTML.text, pOpts);
+             } else {
+                 botSentMsg = await ctx.telegram.sendMessage(chatId, standardHTML.text, pOpts);
+             }
+             // Also send any extracted audios
+             for (const audioUrl of standardHTML.audios) {
+                 try {
+                     await ctx.telegram.sendAudio(chatId, audioUrl);
+                     console.log(`[✅] Sent Quran audio natively to chat ${chatId}: ${audioUrl}`);
+                 } catch(audioErr) {
+                     console.error(`[⚠️] Failed to send Quran audio:`, audioErr);
+                 }
+             }
+         } catch(htmlSendErr) {
+             console.error(`[❌] Standard HTML edit/send failed, falling back to plain text:`, htmlSendErr);
+             const plainText = txt.replace(/<br\s*\/?>/gi, '\n').replace(/<[^>]*>?/gm, '');
+             const cleanOpts = { ...pOpts, parse_mode: undefined };
+             if (currentBotMsgId) {
+                 botSentMsg = await ctx.telegram.editMessageText(chatId, currentBotMsgId, undefined, plainText, cleanOpts);
+             } else {
+                 botSentMsg = await ctx.telegram.sendMessage(chatId, plainText, cleanOpts);
+             }
          }
       }
 

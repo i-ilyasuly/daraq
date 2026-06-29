@@ -33,6 +33,27 @@ jest.mock('./quranService', () => ({
   searchQuran: jest.fn()
 }));
 
+jest.mock('./routerService', () => ({
+  classifyIntent: jest.fn().mockImplementation((query) => {
+    if (query.includes('Hello general') || query.includes('Hello topic')) {
+      return Promise.resolve({
+        intent: 'CHITCHAT',
+        is_complete: true,
+        clarification_prompt: '',
+        chitchat_response: 'Уағалейкумассалам! Daraq көмекшісіне қош келдіңіз.',
+        refined_query: query
+      });
+    }
+    return Promise.resolve({
+      intent: 'KNOWLEDGE_SEARCH',
+      is_complete: true,
+      clarification_prompt: '',
+      chitchat_response: '',
+      refined_query: query
+    });
+  })
+}));
+
 jest.mock('../db/firestore', () => ({
   db: {
     collection: jest.fn().mockReturnThis(),
@@ -70,7 +91,8 @@ describe('aiService (Agentic RAG)', () => {
       expect(onChunk).toHaveBeenNthCalledWith(2, 'Hello world!');
       expect(res.answer).toBe('Hello world!');
       expect(res.sources).toEqual([]);
-      expect(onAction).not.toHaveBeenCalled();
+      expect(onAction).toHaveBeenCalledWith('Дереккөздерден іздеу');
+      expect(onAction).toHaveBeenCalledWith('Жауапты қалыптастыру');
     });
 
     it('calls parallel search on database and handles response stream', async () => {

@@ -195,8 +195,8 @@ export function formatTelegramMessage(text: string, quranSources: any[] = []): s
   // Remove any <br> immediately inside <b> tag at the start of "Мағынасы мен [ХхЗз]икметі"
   formatted = formatted.replace(/<b>\s*<br\s*\/?>\s*(Мағынасы мен [ХхЗз]икметі)/gi, '<b>$1');
   // Reduce multiple breaks between </aside> or <audio> or <hr/> and "Мағынасы мен [ХхЗз]икметі" to at most a single break
-  formatted = formatted.replace(/(?:<\/aside>|<audio\s+src="[^"]+"\s*><\/audio>|<hr\s*\/?>)\s*(?:<br\s*\/?>\s*){2,}(?=<b>\s*Мағынасы мен [ХхЗз]икметі)/gi, '$1<br>');
-  formatted = formatted.replace(/(?:<\/aside>|<audio\s+src="[^"]+"\s*><\/audio>|<hr\s*\/?>)\s*(?:<br\s*\/?>\s*){2,}(?=Мағынасы мен [ХхЗз]икметі)/gi, '$1<br>');
+  formatted = formatted.replace(/(<\/aside>|<audio\s+src="[^"]+"\s*><\/audio>|<hr\s*\/?>)\s*(?:<br\s*\/?>\s*){2,}(?=<b>\s*Мағынасы мен [ХхЗз]икметі)/gi, '$1<br>');
+  formatted = formatted.replace(/(<\/aside>|<audio\s+src="[^"]+"\s*><\/audio>|<hr\s*\/?>)\s*(?:<br\s*\/?>\s*){2,}(?=Мағынасы мен [ХхЗз]икметі)/gi, '$1<br>');
 
   // 4.6 Ensure <hr/> is always drawn AFTER the <audio> player, not above/before it (prevent line overlapping or drawing on top of audio)
   formatted = formatted.replace(/(<hr\s*\/?>)\s*(?:<br\s*\/?>\s*)*(<audio\s+src="[^"]+"\s*><\/audio>)/gi, '$2$1');
@@ -365,3 +365,44 @@ export function isAskingForProof(query: string): boolean {
   ];
   return keywords.some(kw => clean.includes(kw));
 }
+
+/**
+ * Standard Telegram-ға сай келмейтін HTML тегтерін нативті қолдау көрсетілетін тегтерге ауыстыру.
+ * Сонымен қатар <audio> тегтерінен аудио сілтемелерді бөлектеп алу.
+ */
+export function formatForStandardTelegramHTML(html: string): { text: string; audios: string[] } {
+  let text = html;
+  const audios: string[] = [];
+
+  // Extract <audio src="URL"></audio>
+  const audioRegex = /<audio\s+src=["']([^"']+)["']\s*><\/audio>/gi;
+  let match;
+  while ((match = audioRegex.exec(text)) !== null) {
+    audios.push(match[1]);
+  }
+  // Remove <audio> tags
+  text = text.replace(audioRegex, '');
+
+  // Convert <aside>...</aside> to <blockquote expandable>...</blockquote>
+  text = text.replace(/<aside>/gi, '<blockquote expandable>');
+  text = text.replace(/<\/aside>/gi, '</blockquote>');
+
+  // Convert <details><summary>(.*?)</summary>(.*?)</details> to <blockquote expandable><b>$1</b>\n$2</blockquote>
+  text = text.replace(/<details(?:[^>]*)>\s*<summary>([\s\S]*?)<\/summary>([\s\S]*?)<\/details>/gi, '<blockquote expandable><b>$1</b>\n$2</blockquote>');
+
+  // Replace any leftover details/summary tags
+  text = text.replace(/<details(?:[^>]*)>/gi, '<blockquote>');
+  text = text.replace(/<\/details>/gi, '</blockquote>');
+  text = text.replace(/<summary>/gi, '<b>');
+  text = text.replace(/<\/summary>/gi, '</b>\n');
+
+  // Convert <mark>(.*?)</mark> to <b><u>$1</u></b>
+  text = text.replace(/<mark>/gi, '<b><u>');
+  text = text.replace(/<\/mark>/gi, '</u></b>');
+
+  // Convert <tg-reference name=["']?([^"']+)["']?>([\s\S]*?)<\/tg-reference> to <i>[$1]: $2</i>
+  text = text.replace(/<tg-reference\s+name=["']?([^"']+)["']?\s*>([\s\S]*?)<\/tg-reference>/gi, '\n\n<i>[$1]: $2</i>');
+
+  return { text, audios };
+}
+
